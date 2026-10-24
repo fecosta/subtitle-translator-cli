@@ -262,7 +262,7 @@ def translate(
     entries = load_subtitles(input_path)
 
     if output_path is None:
-        output_path = _default_output_path(input_path, settings.target_lang)
+        output_path = default_output_path(input_path, settings.target_lang)
 
     if output_path.exists() and not force and not dry_run:
         raise OutputExistsError(
@@ -363,10 +363,6 @@ def translate(
     )
     return stats
 
-
-def _default_output_path(input_path: Path, target_lang: str) -> Path:
-    """Generate a default output path based on the input name."""
-    return default_output_path(input_path, target_lang)
 
 
 def get_dry_run_info(input_path: Path, settings: Settings) -> DryRunInfo:

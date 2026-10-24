@@ -31,20 +31,6 @@ def test_atomic_write_creates_parent_dirs(tmp_path: Path) -> None:
     assert out.exists()
 
 
-def test_default_output_path_from_en_srt() -> None:
-    from subtranslate.translator import _default_output_path
-
-    path = Path("movie.en.srt")
-    assert _default_output_path(path, "pt-BR") == Path("movie.pt-BR.srt")
-
-
-def test_default_output_path_fallback() -> None:
-    from subtranslate.translator import _default_output_path
-
-    path = Path("movie.srt")
-    assert _default_output_path(path, "pt-BR") == Path("movie.pt-BR.srt")
-
-
 def test_atomic_write_refuses_existing_output(tmp_path: Path) -> None:
     entries = [
         SubtitleEntry(id=1, start=1000, end=2000, text="Hello"),

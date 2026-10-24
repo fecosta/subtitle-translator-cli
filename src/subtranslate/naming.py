@@ -50,58 +50,59 @@ class SubtitleName:
 
     def output_path(self, target_lang: str) -> Path:
         """Return the Jellyfin-compatible output path for the target language."""
-        parts = [self.movie_name, target_lang, *self.attributes]
+        safe_lang = _sanitize_language_tag(target_lang)
+        parts = [self.movie_name, safe_lang, *self.attributes]
         return self.path.with_name(".".join(parts) + self.extension)
 
 
-def _classify_token(token: str) -> str | None:
-    lower = token.lower()
-    if lower in SOURCE_LANG_TAGS or lower in TARGET_LANG_TAGS:
-        return "language"
-    if lower in SUBTITLE_ATTRIBUTES:
-        return "attribute"
-    return None
+def _sanitize_language_tag(tag: str) -> str:
+    """Make a language tag safe for a filename.
+
+    ponytail: full filesystem sanitization is overkill here; the CLI only
+    accepts language codes. Upgrade to a broader charset filter if users ever
+    pass arbitrary strings through --to.
+    """
+    return (
+        tag.replace(" ", "-")
+        .replace("(", "")
+        .replace(")", "")
+        .replace("/", "-")
+        .replace("\\", "-")
+    )
 
 
 def parse_subtitle_name(path: Path) -> SubtitleName:
     """Parse a subtitle filename into its structural components.
 
-    The movie name is everything before the first recognized language or
-    attribute token. The first recognized language tag becomes the language;
-    subsequent recognized tokens are treated as attributes. This keeps the
-    parser conservative and predictable for Jellyfin-style filenames.
+    Tags are read from the right, which is the Jellyfin/Bazarr convention for
+    external subtitles: extension, then optional attributes, then an optional
+    language tag, with everything else forming the movie name. This avoids
+    mistaking title words such as "Hi" or "En" for language tags.
     """
     extension = path.suffix.lower()
     stem = path.name[: -len(path.suffix)] if path.suffix else path.name
     tokens = stem.split(".")
 
-    first_tag_index: int | None = None
-    for index, token in enumerate(tokens):
-        if _classify_token(token) is not None:
-            first_tag_index = index
-            break
-
-    if first_tag_index is None:
-        return SubtitleName(
-            path=path,
-            movie_name=stem,
-            language_tag=None,
-            attributes=(),
-            extension=extension,
-        )
-
-    movie_name = ".".join(tokens[:first_tag_index])
-    language_tag: str | None = None
+    # Consume trailing recognized attributes.
     attributes: list[str] = []
-    for token in tokens[first_tag_index:]:
-        classification = _classify_token(token)
-        if classification == "language" and language_tag is None:
-            language_tag = token
-        elif classification == "attribute":
-            attributes.append(token)
-        # Unknown tokens after the first tag are ignored; they do not affect
-        # naming and are not preserved, which avoids accidents with hashes,
-        # release groups, or other unrelated suffixes.
+    index = len(tokens) - 1
+    while index >= 0 and tokens[index].lower() in SUBTITLE_ATTRIBUTES:
+        attributes.append(tokens[index])
+        index -= 1
+    attributes.reverse()
+
+    # Consume a single language tag immediately before the attributes.
+    language_tag: str | None = None
+    if index >= 0:
+        lower = tokens[index].lower()
+        if lower in SOURCE_LANG_TAGS or lower in TARGET_LANG_TAGS:
+            language_tag = tokens[index]
+            index -= 1
+
+    movie_name = ".".join(tokens[: index + 1])
+    if not movie_name:
+        # Avoid producing a hidden dotfile when the stem is only a tag.
+        movie_name = stem
 
     return SubtitleName(
         path=path,

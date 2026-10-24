@@ -72,9 +72,17 @@ def test_preserves_multiple_attributes() -> None:
     assert parsed.output_path("pt-BR") == Path("Movie.pt-BR.sdh.forced.srt")
 
 
-def test_ignores_unrecognized_suffixes_after_tags() -> None:
+def test_unknown_token_after_language_becomes_movie_name() -> None:
+    # Right-anchored parsing keeps unknown trailing tokens as part of the title
+    # so two different sources cannot collide on the same output.
     parsed = parse_subtitle_name(Path("Movie.en.foobar.srt"))
-    assert parsed.output_path("pt-BR") == Path("Movie.pt-BR.srt")
+    assert parsed.output_path("pt-BR") == Path("Movie.en.foobar.pt-BR.srt")
+
+
+def test_different_unknown_suffixes_do_not_collide() -> None:
+    one = parse_subtitle_name(Path("Movie.en.1.srt"))
+    two = parse_subtitle_name(Path("Movie.en.2.srt"))
+    assert one.output_path("pt-BR") != two.output_path("pt-BR")
 
 
 def test_movie_name_with_periods_is_preserved() -> None:
@@ -109,3 +117,25 @@ def test_existing_target_file_same_path_is_detected() -> None:
     parsed = parse_subtitle_name(Path("Movie.pt-BR.srt"))
     assert parsed.is_target_language
     assert parsed.output_path("pt-BR") == Path("Movie.pt-BR.srt")
+
+
+@pytest.mark.parametrize(
+    ("input_name", "expected_output"),
+    [
+        # Title words that look like tags must stay in the movie name.
+        ("Hi.Mom.2021.en.srt", "Hi.Mom.2021.pt-BR.srt"),
+        ("En.Garde.1990.srt", "En.Garde.1990.pt-BR.srt"),
+        ("Por.Favor.eng.srt", "Por.Favor.pt-BR.srt"),
+        ("The.Eng.Movie.en.srt", "The.Eng.Movie.pt-BR.srt"),
+        ("en.srt", "en.pt-BR.srt"),
+    ],
+)
+def test_title_words_looking_like_tags_are_preserved(
+    input_name: str, expected_output: str
+) -> None:
+    assert default_output_path(Path(input_name), "pt-BR") == Path(expected_output)
+
+
+def test_target_language_tag_is_sanitized() -> None:
+    assert default_output_path(Path("Movie.en.srt"), "pt/BR") == Path("Movie.pt-BR.srt")
+    assert default_output_path(Path("Movie.en.srt"), "pt\\BR") == Path("Movie.pt-BR.srt")
