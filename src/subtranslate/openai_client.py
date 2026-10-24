@@ -16,9 +16,9 @@ SYSTEM_PROMPT = (
     "Prefer natural Brazilian Portuguese over literal translations when the target is pt-BR. "
     "Do not add, remove, or invent dialogue. "
     "Do not include explanations, notes, or markdown. "
-    "Return ONLY a JSON object with a 'subtitles' array containing every input entry, "
-    "each with its original 'id' and the translated 'text'. "
-    "Entries marked 'translate': false are context; return them unchanged."
+    "Return ONLY a JSON object with a 'subtitles' array containing the entries "
+    "marked 'translate': true. Each item must have its original 'id' and the translated 'text'. "
+    "Entries marked 'translate': false are context only; do not return them."
 )
 
 
@@ -77,27 +77,32 @@ def translate_batch(
 
     result: dict[int, str] = {}
     seen_ids: set[int] = set()
+    all_ids = batch.all_ids
     for item in subtitles:
         if not isinstance(item, dict):
             raise ValueError("Invalid subtitle item in response.")
         entry_id = item.get("id")
         text = item.get("text")
-        if not isinstance(entry_id, int) or not isinstance(text, str):
+        if type(entry_id) is not int or not isinstance(text, str):
             raise ValueError("Subtitle item must contain integer 'id' and string 'text'.")
+        if entry_id not in all_ids:
+            raise ValueError(f"Unexpected subtitle identifier returned: {entry_id}.")
         if entry_id in seen_ids:
             raise ValueError(f"Duplicate subtitle identifier returned: {entry_id}.")
         seen_ids.add(entry_id)
         result[entry_id] = text
 
-    if seen_ids != batch.all_ids:
-        missing = batch.all_ids - seen_ids
-        extra = seen_ids - batch.all_ids
-        parts = []
-        if missing:
-            parts.append(f"missing ids: {sorted(missing)}")
-        if extra:
-            parts.append(f"unexpected ids: {sorted(extra)}")
-        raise ValueError(f"Batch identifier mismatch ({'; '.join(parts)}).")
+    # Drop any context entries the model returned despite the prompt.
+    result = {entry_id: text for entry_id, text in result.items() if entry_id in batch.target_ids}
+    returned_ids = set(result.keys())
+
+    if returned_ids != batch.target_ids:
+        missing = batch.target_ids - returned_ids
+        raise ValueError(f"Batch identifier mismatch (missing ids: {sorted(missing)}).")
+
+    for entry_id in batch.target_ids:
+        if not result[entry_id].strip():
+            raise ValueError(f"Empty translation returned for id {entry_id}.")
 
     usage = Usage()
     if response.usage:

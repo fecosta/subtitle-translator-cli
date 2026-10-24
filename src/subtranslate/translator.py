@@ -51,15 +51,15 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _validate_batch(result: TranslationResult, batch) -> None:
-    """Ensure the model returned exactly the expected entries."""
+    """Ensure the model returned exactly the target entries, each translated."""
     returned_ids = set(result.translations.keys())
 
     if len(returned_ids) != len(result.translations):
         raise ValueError("Duplicate subtitle identifiers returned by the model.")
 
-    if returned_ids != batch.all_ids:
-        missing = batch.all_ids - returned_ids
-        extra = returned_ids - batch.all_ids
+    if returned_ids != batch.target_ids:
+        missing = batch.target_ids - returned_ids
+        extra = returned_ids - batch.target_ids
         parts = []
         if missing:
             parts.append(f"missing ids: {sorted(missing)}")
@@ -67,17 +67,10 @@ def _validate_batch(result: TranslationResult, batch) -> None:
             parts.append(f"unexpected ids: {sorted(extra)}")
         raise ValueError(f"Batch identifier mismatch ({'; '.join(parts)}).")
 
-    for entry in batch.entries:
-        text = result.translations[entry.id]
-        if entry.id in batch.target_ids:
-            if not text.strip():
-                raise ValueError(f"Empty translation returned for id {entry.id}.")
-        else:
-            # Context entries should be returned unchanged.
-            if text != entry.text:
-                raise ValueError(
-                    f"Context entry {entry.id} was modified by the model."
-                )
+    for entry_id in batch.target_ids:
+        text = result.translations[entry_id]
+        if not text.strip():
+            raise ValueError(f"Empty translation returned for id {entry_id}.")
 
 
 def _translate_batch_with_retry(

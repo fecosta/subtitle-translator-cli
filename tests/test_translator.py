@@ -13,8 +13,9 @@ from subtranslate.translator import get_dry_run_info, translate
 
 def _fake_result(client, settings, batch) -> TranslationResult:
     translations = {
-        entry.id: (f"[PT] {entry.text}" if entry.id in batch.target_ids else entry.text)
+        entry.id: f"[PT] {entry.text}"
         for entry in batch.entries
+        if entry.id in batch.target_ids
     }
     return TranslationResult(
         translations=translations,
@@ -68,9 +69,13 @@ def test_translate_rejects_missing_ids(sample_srt: Path, settings, tmp_path: Pat
     output = tmp_path / "out.srt"
 
     def fake_translate_batch(client, settings, batch):
-        # Drop the first entry from the response.
-        translations = {entry.id: entry.text for entry in batch.entries}
-        translations.pop(batch.entries[0].id)
+        # Return one fewer target entry than required.
+        translations = {
+            entry.id: f"[PT] {entry.text}"
+            for entry in batch.entries
+            if entry.id in batch.target_ids
+        }
+        translations.pop(next(iter(batch.target_ids)))
         return TranslationResult(translations=translations)
 
     with (
@@ -82,14 +87,18 @@ def test_translate_rejects_missing_ids(sample_srt: Path, settings, tmp_path: Pat
     assert not output.exists()
 
 
-def test_translate_rejects_duplicate_ids(sample_srt: Path, settings, tmp_path: Path) -> None:
+def test_translate_rejects_unknown_ids(sample_srt: Path, settings, tmp_path: Path) -> None:
     output = tmp_path / "out.srt"
 
     def fake_translate_batch(client, settings, batch):
-        translations = {entry.id: entry.text for entry in batch.entries}
-        # Force a duplicate by reusing the first id.
-        first = batch.entries[0].id
-        translations[first + 1000] = translations[first]
+        translations = {
+            entry.id: f"[PT] {entry.text}"
+            for entry in batch.entries
+            if entry.id in batch.target_ids
+        }
+        # Inject an identifier that does not belong to the batch.
+        first = next(iter(batch.target_ids))
+        translations[first + 1000] = "[PT] extra"
         return TranslationResult(translations=translations)
 
     with (
@@ -136,3 +145,72 @@ def test_get_dry_run_info(sample_srt: Path, settings) -> None:
     assert info.batch_count == 3
     assert info.estimated_input_tokens > 0
     assert info.model == settings.model
+
+
+def test_context_entries_not_required_in_response(
+    sample_srt: Path, settings, tmp_path: Path
+) -> None:
+    """Regression: context entries may be omitted from the model response."""
+    output = tmp_path / "out.srt"
+
+    def fake_translate_batch(client, settings, batch):
+        # Return only target ids, even if context ids are present in the batch.
+        return TranslationResult(
+            translations={
+                entry.id: f"[PT] {entry.text}"
+                for entry in batch.entries
+                if entry.id in batch.target_ids
+            }
+        )
+
+    with patch("subtranslate.translator.translate_batch", fake_translate_batch):
+        stats = translate(sample_srt, output, settings)
+
+    assert stats.total_entries == 5
+    translated = load_subtitles(output)
+    for entry in translated:
+        assert entry.text.startswith("[PT]")
+
+
+def test_context_entries_returned_as_translations_are_rejected(
+    sample_srt: Path, settings, tmp_path: Path
+) -> None:
+    """Regression: returning context ids as translations is treated as unexpected."""
+    output = tmp_path / "out.srt"
+
+    def fake_translate_batch(client, settings, batch):
+        translations = {
+            entry.id: f"[PT] {entry.text}" for entry in batch.entries
+        }
+        return TranslationResult(translations=translations)
+
+    with (
+        patch("subtranslate.translator.translate_batch", fake_translate_batch),
+        pytest.raises(TranslationError),
+    ):
+        translate(sample_srt, output, settings)
+
+    assert not output.exists()
+
+
+def test_empty_target_translation_is_rejected(
+    sample_srt: Path, settings, tmp_path: Path
+) -> None:
+    output = tmp_path / "out.srt"
+
+    def fake_translate_batch(client, settings, batch):
+        translations = {
+            entry.id: f"[PT] {entry.text}"
+            for entry in batch.entries
+            if entry.id in batch.target_ids
+        }
+        translations[next(iter(batch.target_ids))] = "   "
+        return TranslationResult(translations=translations)
+
+    with (
+        patch("subtranslate.translator.translate_batch", fake_translate_batch),
+        pytest.raises(TranslationError),
+    ):
+        translate(sample_srt, output, settings)
+
+    assert not output.exists()

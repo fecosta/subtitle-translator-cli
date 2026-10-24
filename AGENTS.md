@@ -23,9 +23,10 @@ uv run subtranslate translate <file.srt> [options]
 
 1. Parse SRT with `pysubs2` and assign stable 1-based ids.
 2. Build overlapping batches (`batching.py`) with context entries.
-3. Call OpenAI JSON mode; validate returned ids against batch ids.
-4. Retry recoverable errors with exponential backoff (max 3 retries).
-5. Write to a temp SRT, validate it, then `os.replace` atomically.
+3. Send each batch to OpenAI JSON mode. Context entries are marked `"translate": false` and are **not** expected in the response.
+4. Validate that the response contains exactly the target identifiers, each with a non-empty translation.
+5. Retry recoverable errors with exponential backoff (max 3 retries).
+6. Write to a temp SRT, validate it, then atomically install the final output.
 
 ## Testing
 

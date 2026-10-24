@@ -33,3 +33,8 @@ def _ensure_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     # Prevent real network calls if anything leaks through.
     monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:9999/invalid")
+
+
+@pytest.fixture(autouse=True)
+def _no_translator_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("subtranslate.translator.time.sleep", lambda _seconds: None)
