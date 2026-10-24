@@ -197,7 +197,7 @@ def scan_command(
             require_mount=require_mount,
             include_variants=include_variants,
         )
-    except (FileNotFoundError, NotADirectoryError) as exc:
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=2) from exc
 

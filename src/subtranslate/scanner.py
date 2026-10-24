@@ -129,9 +129,7 @@ def scan_library(
 ) -> ScanResult:
     """Recursively scan a library and build a read-only translation plan."""
     if library_path.is_symlink():
-        raise FileNotFoundError(
-            f"Library path must not be a symlink: {library_path}"
-        )
+        raise ValueError(f"Library path must not be a symlink: {library_path}")
     library_path = library_path.resolve()
     if not library_path.exists():
         raise FileNotFoundError(f"Library path does not exist: {library_path}")
@@ -196,6 +194,15 @@ def scan_library(
 
         source = english[0]
         output_path = source.output_path(settings.target_lang)
+        if output_path.exists():
+            result.items.append(
+                _build_skip_item(
+                    movie_dir, movie_name, "Output file already exists"
+                )
+            )
+            result.skipped_count += 1
+            continue
+
         dry_run_info: DryRunInfo | None = None
         try:
             dry_run_info = get_dry_run_info(source.path, settings)

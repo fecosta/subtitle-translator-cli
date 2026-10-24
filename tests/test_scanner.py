@@ -252,5 +252,19 @@ def test_scan_rejects_symlinked_root(tmp_path: Path, scan_settings: Settings) ->
     link = tmp_path / "link_library"
     link.symlink_to(real_library)
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ValueError):
         scan_library(link, scan_settings)
+
+
+def test_scan_skips_when_output_file_already_exists(
+    tmp_path: Path, scan_settings: Settings
+) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+    _write_srt(library / "Movie A" / "Movie.A.pt-BR.srt")
+
+    result = scan_library(library, scan_settings)
+
+    assert result.eligible_count == 0
+    assert result.skipped_count == 1
+    assert "Portuguese" in result.items[0].reason or "Output file" in result.items[0].reason
