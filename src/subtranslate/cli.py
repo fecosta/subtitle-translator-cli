@@ -67,11 +67,13 @@ def translate_command(
             target_lang=to,
             batch_size=batch_size,
         )
+        output_path = output if output is not None else default_output_path(input_file, to)
     except ConfigurationError as exc:
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise typer.Exit(code=1) from exc
-
-    output_path = output or default_output_path(input_file, to)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
 
     print_header(input_file, from_, to, settings.model)
 

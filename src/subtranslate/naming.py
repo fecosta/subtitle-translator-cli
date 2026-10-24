@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+_INVALID_TAG_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
 
 SOURCE_LANG_TAGS = frozenset({"en", "eng", "english"})
 BRAZILIAN_PORTUGUESE_TAGS = frozenset({"pt-br", "pt_br", "pob"})
@@ -58,17 +61,13 @@ class SubtitleName:
 def _sanitize_language_tag(tag: str) -> str:
     """Make a language tag safe for a filename.
 
-    ponytail: full filesystem sanitization is overkill here; the CLI only
-    accepts language codes. Upgrade to a broader charset filter if users ever
-    pass arbitrary strings through --to.
+    Keeps only alphanumeric characters, hyphens, and underscores. This rejects
+    NUL bytes, Windows-reserved characters, and other filesystem risks.
     """
-    return (
-        tag.replace(" ", "-")
-        .replace("(", "")
-        .replace(")", "")
-        .replace("/", "-")
-        .replace("\\", "-")
-    )
+    cleaned = _INVALID_TAG_CHARS.sub("-", tag).strip("-_")
+    if not cleaned:
+        raise ValueError(f"Invalid target language tag after sanitization: {tag!r}")
+    return cleaned
 
 
 def parse_subtitle_name(path: Path) -> SubtitleName:

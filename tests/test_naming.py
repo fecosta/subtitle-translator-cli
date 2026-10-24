@@ -139,3 +139,11 @@ def test_title_words_looking_like_tags_are_preserved(
 def test_target_language_tag_is_sanitized() -> None:
     assert default_output_path(Path("Movie.en.srt"), "pt/BR") == Path("Movie.pt-BR.srt")
     assert default_output_path(Path("Movie.en.srt"), "pt\\BR") == Path("Movie.pt-BR.srt")
+    assert default_output_path(Path("Movie.en.srt"), "pt( BR )") == Path("Movie.pt-BR.srt")
+
+
+def test_invalid_target_language_tag_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        default_output_path(Path("Movie.en.srt"), "")
+    with pytest.raises(ValueError):
+        default_output_path(Path("Movie.en.srt"), '<>:\\"|?*')
