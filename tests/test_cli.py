@@ -46,6 +46,14 @@ def test_cli_argument_validation(tmp_path: Path) -> None:
     assert result.exit_code != 0
 
 
+def test_cli_rejects_invalid_target_language(tmp_path: Path) -> None:
+    srt = tmp_path / "movie.en.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n")
+    result = runner.invoke(app, ["translate", str(srt), "--to", "<>:\"|?*"])
+    assert result.exit_code == 1
+    assert "Invalid target language tag" in result.output
+
+
 def _fake_result(client, settings, batch):
     from subtranslate.models import TranslationResult, Usage
 
