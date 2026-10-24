@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
 from .config import DEFAULT_BATCH_SIZE, DEFAULT_SOURCE_LANG, DEFAULT_TARGET_LANG, get_settings
+from .debug import translate_batch_by_id, translate_batch_by_range
 from .exceptions import (
     ConfigurationError,
     FileConflictError,
@@ -22,6 +24,8 @@ from .progress import (
 from .translator import TranslationStats, _default_output_path, get_dry_run_info, translate
 
 app = typer.Typer(name="subtranslate", help="Translate SRT subtitles with OpenAI")
+debug_app = typer.Typer(name="debug", help="Debug helpers for subtitle translation")
+app.add_typer(debug_app)
 console = Console(stderr=True)
 
 
@@ -123,3 +127,94 @@ def translate_command(
         reporter.stop()
 
     print_summary(stats, output_path)
+
+
+@debug_app.command("batch-by-id")
+def debug_batch_by_id_command(
+    input_file: Path = typer.Argument(  # noqa: B008
+        ..., exists=True, readable=True, help="Input SRT file"
+    ),
+    subtitle_id: int = typer.Argument(..., help="Subtitle id to debug"),
+    to: str = typer.Option(DEFAULT_TARGET_LANG, "--to", help="Target language"),  # noqa: B008
+    from_: str = typer.Option(  # noqa: B008
+        DEFAULT_SOURCE_LANG, "--from", help="Source language", show_default=True
+    ),
+    model: str | None = typer.Option(None, "--model", help="OpenAI model"),  # noqa: B008
+    batch_size: int = typer.Option(  # noqa: B008
+        DEFAULT_BATCH_SIZE,
+        "--batch-size",
+        help="Number of subtitles per translation batch",
+        min=1,
+        max=200,
+    ),
+) -> None:
+    """Translate a single batch containing the given subtitle id."""
+    try:
+        settings = get_settings(
+            model=model,
+            source_lang=from_,
+            target_lang=to,
+            batch_size=batch_size,
+        )
+    except ConfigurationError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    try:
+        batch, result = translate_batch_by_id(input_file, settings, subtitle_id)
+    except Exception as exc:
+        console.print(f"[red]Debug error:[/red] {exc}")
+        raise typer.Exit(code=4) from exc
+
+    print(json.dumps({
+        "target_ids": sorted(batch.target_ids),
+        "translations": result.translations,
+        "input_tokens": result.usage.input_tokens,
+        "output_tokens": result.usage.output_tokens,
+    }, ensure_ascii=False, indent=2))
+
+
+@debug_app.command("batch-by-range")
+def debug_batch_by_range_command(
+    input_file: Path = typer.Argument(  # noqa: B008
+        ..., exists=True, readable=True, help="Input SRT file"
+    ),
+    start_id: int = typer.Argument(..., help="Start subtitle id"),
+    end_id: int = typer.Argument(..., help="End subtitle id"),
+    to: str = typer.Option(DEFAULT_TARGET_LANG, "--to", help="Target language"),  # noqa: B008
+    from_: str = typer.Option(  # noqa: B008
+        DEFAULT_SOURCE_LANG, "--from", help="Source language", show_default=True
+    ),
+    model: str | None = typer.Option(None, "--model", help="OpenAI model"),  # noqa: B008
+    batch_size: int = typer.Option(  # noqa: B008
+        DEFAULT_BATCH_SIZE,
+        "--batch-size",
+        help="Number of subtitles per translation batch",
+        min=1,
+        max=200,
+    ),
+) -> None:
+    """Translate the first batch fully contained in the given id range."""
+    try:
+        settings = get_settings(
+            model=model,
+            source_lang=from_,
+            target_lang=to,
+            batch_size=batch_size,
+        )
+    except ConfigurationError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    try:
+        batch, result = translate_batch_by_range(input_file, settings, start_id, end_id)
+    except Exception as exc:
+        console.print(f"[red]Debug error:[/red] {exc}")
+        raise typer.Exit(code=4) from exc
+
+    print(json.dumps({
+        "target_ids": sorted(batch.target_ids),
+        "translations": result.translations,
+        "input_tokens": result.usage.input_tokens,
+        "output_tokens": result.usage.output_tokens,
+    }, ensure_ascii=False, indent=2))

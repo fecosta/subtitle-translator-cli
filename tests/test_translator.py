@@ -12,6 +12,7 @@ from subtranslate.checkpoint import (
     load_checkpoint,
     save_checkpoint,
 )
+from subtranslate.config import Settings
 from subtranslate.exceptions import FileConflictError, OutputExistsError, TranslationError
 from subtranslate.models import TranslationResult, Usage
 from subtranslate.srt import load_subtitles
@@ -375,6 +376,39 @@ def test_split_sub_batches_are_checkpointed_independently(
     assert checkpoint.get(2)
     assert checkpoint.get(3)
     assert 4 not in checkpoint
+
+
+def test_positional_response_maps_large_ids_correctly(
+    hope_like_batch: Path, tmp_path: Path
+) -> None:
+    """Regression for id hallucination: positional responses map to the right ids."""
+    settings = Settings(
+        api_key="sk-test",
+        model="gpt-4.1-mini",
+        source_lang="en",
+        target_lang="pt-BR",
+        batch_size=40,
+    )
+    output = tmp_path / "out.srt"
+
+    def positional_batch(client, settings, batch):
+        translations = {
+            entry.id: f"[PT] {entry.text}"
+            for entry in batch.entries
+            if entry.id in batch.target_ids
+        }
+        return TranslationResult(
+            translations=translations,
+            usage=Usage(input_tokens=10, output_tokens=5),
+        )
+
+    with patch("subtranslate.translator.translate_batch", positional_batch):
+        translate(hope_like_batch, output, settings)
+
+    translated = load_subtitles(output)
+    assert any(
+        entry.text == "[PT] Line thirteen sixty-one" for entry in translated
+    )
 
 
 def test_resume_after_partial_split_does_not_retransmit_completed_ids(

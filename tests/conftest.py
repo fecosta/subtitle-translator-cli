@@ -18,6 +18,11 @@ def sample_srt(fixtures_dir: Path) -> Path:
 
 
 @pytest.fixture
+def hope_like_batch(fixtures_dir: Path) -> Path:
+    return fixtures_dir / "hope_like_batch.srt"
+
+
+@pytest.fixture
 def settings() -> Settings:
     return Settings(
         api_key="sk-test",

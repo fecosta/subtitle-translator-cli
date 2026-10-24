@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pysubs2
 
 from .exceptions import SubtitleError
 from .models import SubtitleEntry
+
+_SRT_INDEX_RE = re.compile(
+    r"^(\d+)\s*\n\d{1,2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{3}",
+    re.MULTILINE,
+)
+
+
+def _read_srt_indices(path: Path) -> list[int]:
+    """Read the numeric index that precedes each SRT cue block."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except Exception as exc:
+        raise SubtitleError(f"Could not read subtitle file: {exc}") from exc
+    return [int(match.group(1)) for match in _SRT_INDEX_RE.finditer(text)]
 
 
 def load_subtitles(path: Path) -> list[SubtitleEntry]:
@@ -18,9 +33,13 @@ def load_subtitles(path: Path) -> list[SubtitleEntry]:
     if not subs.events:
         raise SubtitleError("Subtitle file contains no entries.")
 
+    indices = _read_srt_indices(path)
+    if len(indices) != len(subs.events) or len(set(indices)) != len(indices):
+        indices = list(range(1, len(subs.events) + 1))
+
     return [
         SubtitleEntry(
-            id=index + 1,
+            id=indices[index],
             start=event.start,
             end=event.end,
             text=event.text,

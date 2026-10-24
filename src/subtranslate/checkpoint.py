@@ -10,7 +10,7 @@ from typing import Any
 
 from .config import Settings
 
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2
 
 
 def compute_source_hash(path: Path) -> str:

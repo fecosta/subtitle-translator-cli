@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,7 +28,7 @@ class _FakeUsage:
     completion_tokens: int
 
 
-def _make_response(translations: list[dict], prompt_tokens: int = 10, completion_tokens: int = 5):
+def _make_response(translations: list[Any], prompt_tokens: int = 10, completion_tokens: int = 5):
     content = json.dumps({"subtitles": translations})
     response = MagicMock()
     response.choices = [_FakeChoice(_FakeMessage(content))]
@@ -55,15 +56,16 @@ def _settings() -> Settings:
     )
 
 
-def test_system_prompt_forbids_returning_context() -> None:
+def test_system_prompt_requests_positional_responses() -> None:
+    assert "in the same order" in SYSTEM_PROMPT.lower()
+    assert "do not include the 'id'" in SYSTEM_PROMPT.lower()
     assert "do not return them" in SYSTEM_PROMPT.lower()
-    assert "translate': false" in SYSTEM_PROMPT
 
 
 def test_translate_batch_sends_context_entries() -> None:
     batch = _batch()
     settings = _settings()
-    response = _make_response([{"id": 2, "text": "Olá"}, {"id": 3, "text": "mundo"}])
+    response = _make_response([{"text": "Olá"}, {"text": "mundo"}])
     client = MagicMock()
     client.chat.completions.create.return_value = response
 
@@ -78,10 +80,10 @@ def test_translate_batch_sends_context_entries() -> None:
     assert {item["id"] for item in context_items} == {1, 4}
 
 
-def test_translate_batch_accepts_only_target_translations() -> None:
+def test_translate_batch_maps_responses_by_position() -> None:
     batch = _batch()
     settings = _settings()
-    response = _make_response([{"id": 2, "text": "Olá"}, {"id": 3, "text": "mundo"}])
+    response = _make_response([{"text": "Olá"}, {"text": "mundo"}])
     client = MagicMock()
     client.chat.completions.create.return_value = response
 
@@ -89,17 +91,10 @@ def test_translate_batch_accepts_only_target_translations() -> None:
     assert result.translations == {2: "Olá", 3: "mundo"}
 
 
-def test_translate_batch_drops_context_entries_from_response() -> None:
+def test_translate_batch_accepts_text_strings_in_fallback_mode() -> None:
     batch = _batch()
     settings = _settings()
-    response = _make_response(
-        [
-            {"id": 1, "text": "modified context"},
-            {"id": 2, "text": "Olá"},
-            {"id": 3, "text": "mundo"},
-            {"id": 4, "text": "modified context"},
-        ]
-    )
+    response = _make_response(["Olá", "mundo"])
     client = MagicMock()
     client.chat.completions.create.return_value = response
 
@@ -107,53 +102,36 @@ def test_translate_batch_drops_context_entries_from_response() -> None:
     assert result.translations == {2: "Olá", 3: "mundo"}
 
 
-def test_translate_batch_rejects_missing_target_ids() -> None:
+def test_translate_batch_rejects_too_few_responses() -> None:
     batch = _batch()
     settings = _settings()
-    response = _make_response([{"id": 2, "text": "Olá"}])
+    response = _make_response([{"text": "Olá"}])
     client = MagicMock()
     client.chat.completions.create.return_value = response
 
-    with pytest.raises(ValueError, match="identifier mismatch"):
+    with pytest.raises(ValueError, match="size mismatch"):
         translate_batch(client, settings, batch)
 
 
-def test_translate_batch_rejects_unexpected_target_ids() -> None:
+def test_translate_batch_rejects_too_many_responses() -> None:
     batch = _batch()
     settings = _settings()
-    response = _make_response(
-        [
-            {"id": 2, "text": "Olá"},
-            {"id": 3, "text": "mundo"},
-            {"id": 99, "text": "extra"},
-        ]
-    )
+    response = _make_response([{"text": "Olá"}, {"text": "mundo"}, {"text": "extra"}])
     client = MagicMock()
     client.chat.completions.create.return_value = response
 
-    with pytest.raises(ValueError, match="Unexpected subtitle identifier"):
+    with pytest.raises(ValueError, match="size mismatch"):
         translate_batch(client, settings, batch)
 
 
 def test_translate_batch_rejects_empty_translation() -> None:
     batch = _batch()
     settings = _settings()
-    response = _make_response([{"id": 2, "text": "Olá"}, {"id": 3, "text": "   "}])
+    response = _make_response([{"text": "Olá"}, {"text": "   "}])
     client = MagicMock()
     client.chat.completions.create.return_value = response
 
     with pytest.raises(ValueError, match="Empty translation"):
-        translate_batch(client, settings, batch)
-
-
-def test_translate_batch_rejects_duplicate_ids() -> None:
-    batch = _batch()
-    settings = _settings()
-    response = _make_response([{"id": 2, "text": "Olá"}, {"id": 2, "text": "mundo"}])
-    client = MagicMock()
-    client.chat.completions.create.return_value = response
-
-    with pytest.raises(ValueError, match="Duplicate"):
         translate_batch(client, settings, batch)
 
 
@@ -193,3 +171,20 @@ def test_structured_output_for_supported_models() -> None:
 def test_json_object_fallback_for_unsupported_models() -> None:
     fmt = _response_format("gpt-3.5-turbo")
     assert fmt["type"] == "json_object"
+
+
+def test_positional_mapping_with_high_subtitle_ids() -> None:
+    """Regression for id hallucination (e.g. 1361 -> 13561)."""
+    entries = [
+        SubtitleEntry(id=1360, start=1000, end=2000, text="Before"),
+        SubtitleEntry(id=1361, start=2000, end=3000, text="Target"),
+        SubtitleEntry(id=1362, start=3000, end=4000, text="After"),
+    ]
+    batch = Batch(entries=entries, target_ids={1361})
+    settings = _settings()
+    response = _make_response([{"text": "Alvo"}])
+    client = MagicMock()
+    client.chat.completions.create.return_value = response
+
+    result = translate_batch(client, settings, batch)
+    assert result.translations == {1361: "Alvo"}

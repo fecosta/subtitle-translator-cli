@@ -1,0 +1,39 @@
+1
+00:00:01,000 --> 00:00:03,000
+First line
+
+2
+00:00:03,000 --> 00:00:05,000
+Second line
+
+3
+00:00:05,000 --> 00:00:07,000
+Third line
+
+4
+00:00:07,000 --> 00:00:09,000
+Fourth line
+
+1360
+00:02:15,000 --> 00:02:17,000
+Line thirteen sixty
+
+1361
+00:02:17,000 --> 00:02:19,000
+Line thirteen sixty-one
+
+1362
+00:02:19,000 --> 00:02:21,000
+Line thirteen sixty-two
+
+1363
+00:02:21,000 --> 00:02:23,000
+Line thirteen sixty-three
+
+1364
+00:02:23,000 --> 00:02:25,000
+Line thirteen sixty-four
+
+1365
+00:02:25,000 --> 00:02:27,000
+Line thirteen sixty-five

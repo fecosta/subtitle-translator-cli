@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from typer.testing import CliRunner
 
@@ -43,3 +44,46 @@ def test_cli_argument_validation(tmp_path: Path) -> None:
     missing = tmp_path / "does_not_exist.srt"
     result = runner.invoke(app, ["translate", str(missing)])
     assert result.exit_code != 0
+
+
+def _fake_result(client, settings, batch):
+    from subtranslate.models import TranslationResult, Usage
+
+    translations = {
+        entry.id: f"[PT] {entry.text}"
+        for entry in batch.entries
+        if entry.id in batch.target_ids
+    }
+    return TranslationResult(
+        translations=translations,
+        usage=Usage(input_tokens=1, output_tokens=1),
+    )
+
+
+def test_cli_debug_batch_by_id(hope_like_batch: Path) -> None:
+    with patch("subtranslate.debug.translate_batch", _fake_result):
+        result = runner.invoke(
+            app, ["debug", "batch-by-id", str(hope_like_batch), "1361", "--batch-size", "5"]
+        )
+    assert result.exit_code == 0
+    assert "1361" in result.output
+    assert "[PT]" in result.output
+
+
+def test_cli_debug_batch_by_range(hope_like_batch: Path) -> None:
+    with patch("subtranslate.debug.translate_batch", _fake_result):
+        result = runner.invoke(
+            app,
+            [
+                "debug",
+                "batch-by-range",
+                str(hope_like_batch),
+                "1361",
+                "1365",
+                "--batch-size",
+                "5",
+            ],
+        )
+    assert result.exit_code == 0
+    assert "1361" in result.output
+    assert "[PT]" in result.output

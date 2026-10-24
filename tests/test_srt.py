@@ -65,3 +65,24 @@ def test_malformed_srt_raises(tmp_path: Path) -> None:
     bad.write_text("not a subtitle file")
     with pytest.raises(SubtitleError):
         load_subtitles(bad)
+
+
+def test_load_preserves_high_srt_ids_despite_bom(tmp_path: Path) -> None:
+    path = tmp_path / "bom.srt"
+    path.write_bytes(
+        b"\xef\xbb\xbf"
+        b"1360\n00:00:01,000 --> 00:00:03,000\nBefore\n\n"
+        b"1361\n00:00:03,000 --> 00:00:05,000\nTarget\n\n"
+    )
+    entries = load_subtitles(path)
+    assert [entry.id for entry in entries] == [1360, 1361]
+
+
+def test_load_falls_back_to_sequential_ids_on_duplicates(tmp_path: Path) -> None:
+    path = tmp_path / "dup.srt"
+    path.write_text(
+        "1\n00:00:01,000 --> 00:00:03,000\nFirst\n\n"
+        "1\n00:00:03,000 --> 00:00:05,000\nSecond\n\n"
+    )
+    entries = load_subtitles(path)
+    assert [entry.id for entry in entries] == [1, 2]
