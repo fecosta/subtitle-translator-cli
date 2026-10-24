@@ -81,18 +81,22 @@ def _find_srt_files(
 def _classify_group(
     names: list[SubtitleName],
     include_variants: bool,
-) -> tuple[list[SubtitleName], list[SubtitleName]]:
-    """Return (english candidates, portuguese files) for a movie group."""
+) -> tuple[list[SubtitleName], list[SubtitleName], list[SubtitleName]]:
+    """Return (english candidates, full portuguese, variant portuguese)."""
     english: list[SubtitleName] = []
     portuguese: list[SubtitleName] = []
+    portuguese_variants: list[SubtitleName] = []
     for name in names:
         if name.is_target_language:
-            portuguese.append(name)
+            if name.has_specialized_variant:
+                portuguese_variants.append(name)
+            else:
+                portuguese.append(name)
         elif name.is_source_language and (
             include_variants or not name.has_specialized_variant
         ):
             english.append(name)
-    return english, portuguese
+    return english, portuguese, portuguese_variants
 
 
 def _build_skip_item(
@@ -124,13 +128,19 @@ def scan_library(
     include_variants: bool = False,
 ) -> ScanResult:
     """Recursively scan a library and build a read-only translation plan."""
+    if library_path.is_symlink():
+        raise FileNotFoundError(
+            f"Library path must not be a symlink: {library_path}"
+        )
     library_path = library_path.resolve()
     if not library_path.exists():
         raise FileNotFoundError(f"Library path does not exist: {library_path}")
     if not library_path.is_dir():
         raise NotADirectoryError(f"Library path is not a directory: {library_path}")
     if require_mount and not os.path.ismount(library_path):
-        raise FileNotFoundError(f"Library path is not a mounted filesystem: {library_path}")
+        raise FileNotFoundError(
+            f"Library path is not a mounted filesystem: {library_path}"
+        )
 
     walk_errors: list[tuple[Path, str]] = []
     groups, directory_count = _find_srt_files(library_path, walk_errors)
@@ -141,9 +151,11 @@ def scan_library(
     cost_unknown = False
 
     for (movie_dir, movie_name), names in sorted(groups.items()):
-        english, portuguese = _classify_group(names, include_variants)
+        english, portuguese, portuguese_variants = _classify_group(
+            names, include_variants
+        )
         result.english_files += len([n for n in names if n.is_source_language])
-        result.portuguese_files += len(portuguese)
+        result.portuguese_files += len(portuguese) + len(portuguese_variants)
 
         if portuguese:
             pt = portuguese[0]

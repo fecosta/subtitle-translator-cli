@@ -230,3 +230,27 @@ def test_scan_groups_by_movie_name_within_directory(
     statuses = {item.movie_name: item.status for item in result.items}
     assert statuses["Movie.A"] == ScanStatus.SKIP
     assert statuses["Other"] == ScanStatus.TRANSLATE
+
+
+def test_scan_variant_portuguese_does_not_block_full_translation(
+    tmp_path: Path, scan_settings: Settings
+) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+    _write_srt(library / "Movie A" / "Movie.A.pt-BR.forced.srt")
+
+    result = scan_library(library, scan_settings)
+
+    assert result.eligible_count == 1
+    assert result.portuguese_files == 1
+    assert result.items[0].status == ScanStatus.TRANSLATE
+
+
+def test_scan_rejects_symlinked_root(tmp_path: Path, scan_settings: Settings) -> None:
+    real_library = tmp_path / "real_library"
+    _write_srt(real_library / "Movie A" / "Movie.A.en.srt")
+    link = tmp_path / "link_library"
+    link.symlink_to(real_library)
+
+    with pytest.raises(FileNotFoundError):
+        scan_library(link, scan_settings)
