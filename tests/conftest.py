@@ -28,6 +28,11 @@ def settings() -> Settings:
     )
 
 
+@pytest.fixture
+def checkpoint_dir(tmp_path: Path) -> Path:
+    return tmp_path / "checkpoints"
+
+
 @pytest.fixture(autouse=True)
 def _ensure_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -38,3 +43,8 @@ def _ensure_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _no_translator_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("subtranslate.translator.time.sleep", lambda _seconds: None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_checkpoints(monkeypatch: pytest.MonkeyPatch, checkpoint_dir: Path) -> None:
+    monkeypatch.setattr("subtranslate.checkpoint.CHECKPOINT_BASE_DIR", checkpoint_dir)

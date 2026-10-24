@@ -79,6 +79,22 @@ If `--output` is omitted, the default output path is derived from the input:
 
 Never commit API credentials to version control.
 
+## Checkpoints and resume
+
+The CLI saves progress after every successful batch to a local checkpoint in `~/.cache/subtranslate/checkpoints/`. Checkpoints are keyed to the source file's content hash and the translation settings (source/target language, model, batch size).
+
+If a batch fails, the error message shows the checkpoint location. Rerun the exact same command to resume from the last completed batch without retransmitting finished work:
+
+```bash
+uv run subtranslate translate movie.en.srt
+```
+
+The checkpoint is deleted automatically once the final SRT is written and validated.
+
+## Structured outputs
+
+For supported OpenAI models (gpt-4o and gpt-4.1 families), the CLI requests strict JSON-schema responses to improve reliability. Other models fall back to JSON-mode with the same response contract.
+
 ## Cost considerations
 
 Translation cost depends on subtitle length, batch size, and model pricing. The CLI reports actual token usage after translation and shows an estimated cost for known models during dry-runs. Use `--dry-run` to preview the expected number of batches and tokens before spending API credits.
@@ -87,6 +103,7 @@ Translation cost depends on subtitle length, batch size, and model pricing. The 
 
 - **Missing API key**: export `OPENAI_API_KEY`.
 - **Rate limits**: translation uses bounded retries with exponential backoff; large files may still hit rate limits.
+- **Batch failed**: the error message includes the batch number, expected ids, and checkpoint path. Rerun the same command to resume.
 - **Output already exists**: use `--force` to overwrite.
 - **Malformed SRT**: ensure the file is valid UTF-8 SRT with correct timestamps.
 - **NAS permission errors**: verify the mount and directory permissions; the CLI will report filesystem errors without remounting.

@@ -8,19 +8,29 @@ from pathlib import Path
 import openai
 
 from .batching import make_batches
+from .checkpoint import (
+    build_identity,
+    checkpoint_path,
+    compute_source_hash,
+    load_checkpoint,
+    remove_checkpoint,
+    save_checkpoint,
+)
 from .config import MODEL_PRICING, Settings
 from .exceptions import (
+    BatchValidationError,
     ConfigurationError,
     FileConflictError,
     OutputExistsError,
     TranslationError,
 )
 from .fileio import atomic_write_path
-from .models import SubtitleEntry, TranslationResult, Usage
+from .models import Batch, SubtitleEntry, TranslationResult, Usage
 from .openai_client import translate_batch
 from .srt import load_subtitles
 
 MAX_RETRIES = 3
+MIN_SPLIT_SIZE = 1
 PROMPT_OVERHEAD_TOKENS = 200
 
 
@@ -50,12 +60,9 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _validate_batch(result: TranslationResult, batch) -> None:
+def _validate_batch(result: TranslationResult, batch: Batch) -> None:
     """Ensure the model returned exactly the target entries, each translated."""
     returned_ids = set(result.translations.keys())
-
-    if len(returned_ids) != len(result.translations):
-        raise ValueError("Duplicate subtitle identifiers returned by the model.")
 
     if returned_ids != batch.target_ids:
         missing = batch.target_ids - returned_ids
@@ -76,18 +83,14 @@ def _validate_batch(result: TranslationResult, batch) -> None:
 def _translate_batch_with_retry(
     client: openai.OpenAI,
     settings: Settings,
-    batch,
-    progress_callback: Callable[[int, int], None] | None = None,
-    batch_index: int = 0,
-    total_batches: int = 0,
+    batch: Batch,
 ) -> TranslationResult:
+    """Translate a batch with bounded retries."""
     last_error: Exception | None = None
     for attempt in range(MAX_RETRIES + 1):
         try:
             result = translate_batch(client, settings, batch)
             _validate_batch(result, batch)
-            if progress_callback:
-                progress_callback(batch_index + 1, total_batches)
             return result
         except (
             openai.APIConnectionError,
@@ -101,10 +104,100 @@ def _translate_batch_with_retry(
                 time.sleep(2**attempt)
             continue
 
-    raise TranslationError(
-        f"Batch {batch_index + 1}/{total_batches} failed after "
-        f"{MAX_RETRIES + 1} attempts: {last_error}"
-    ) from last_error
+    message = f"Batch failed after {MAX_RETRIES + 1} attempts: {last_error}"
+    if isinstance(last_error, ValueError):
+        raise BatchValidationError(message) from last_error
+    raise TranslationError(message) from last_error
+
+
+def _detailed_batch_error(
+    batch: Batch,
+    batch_index: int,
+    total_batches: int,
+    checkpoint_path: Path,
+    cause: Exception,
+) -> TranslationError:
+    """Build a diagnostic error message for a failed batch."""
+    target_ids = sorted(batch.target_ids)
+    if len(target_ids) > 1:
+        target_range = f"{target_ids[0]}-{target_ids[-1]}"
+    else:
+        target_range = str(target_ids[0])
+    return TranslationError(
+        f"Batch {batch_index + 1}/{total_batches} failed after {MAX_RETRIES + 1} attempts.\n"
+        f"Expected target ids: {target_ids}\n"
+        f"Range: {target_range}\n"
+        f"Cause: {cause}\n"
+        f"Completed batches were checkpointed.\n"
+        f"Checkpoint: {checkpoint_path}\n"
+        "Rerun the same command to resume the translation."
+    )
+
+
+def _translate_batch_recursive(
+    client: openai.OpenAI,
+    settings: Settings,
+    batch: Batch,
+    batch_index: int,
+    total_batches: int,
+    cp_path: Path,
+    identity: dict,
+    translations: dict[int, str],
+) -> TranslationResult:
+    """Translate a batch, splitting it on validation failures.
+
+    Successful translations are merged into ``translations`` and checkpointed
+    immediately, so even split sub-batches are preserved if a sibling fails.
+    """
+    try:
+        result = _translate_batch_with_retry(client, settings, batch)
+    except BatchValidationError as exc:
+        target_ids = sorted(batch.target_ids)
+        if len(target_ids) <= MIN_SPLIT_SIZE:
+            raise _detailed_batch_error(
+                batch, batch_index, total_batches, cp_path, exc
+            ) from exc
+
+        # Split target entries in half and translate each half with the same context.
+        mid = len(target_ids) // 2
+        left_batch = Batch(entries=batch.entries, target_ids=set(target_ids[:mid]))
+        right_batch = Batch(entries=batch.entries, target_ids=set(target_ids[mid:]))
+
+        left_result = _translate_batch_recursive(
+            client,
+            settings,
+            left_batch,
+            batch_index,
+            total_batches,
+            cp_path,
+            identity,
+            translations,
+        )
+        right_result = _translate_batch_recursive(
+            client,
+            settings,
+            right_batch,
+            batch_index,
+            total_batches,
+            cp_path,
+            identity,
+            translations,
+        )
+        combined = {**left_result.translations, **right_result.translations}
+        usage = Usage(
+            input_tokens=left_result.usage.input_tokens + right_result.usage.input_tokens,
+            output_tokens=left_result.usage.output_tokens + right_result.usage.output_tokens,
+        )
+        return TranslationResult(translations=combined, usage=usage)
+    except TranslationError as exc:
+        raise _detailed_batch_error(
+            batch, batch_index, total_batches, cp_path, exc
+        ) from exc
+
+    for entry_id, text in result.translations.items():
+        translations[entry_id] = text
+    save_checkpoint(cp_path, identity, translations)
+    return result
 
 
 def _build_translated_entries(
@@ -161,7 +254,7 @@ def translate(
     verbose: bool = False,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> TranslationStats:
-    """Translate an SRT file and write the result."""
+    """Translate an SRT file and write the result, using checkpoints for resume."""
     if not settings.api_key:
         raise ConfigurationError("OPENAI_API_KEY is not set.")
 
@@ -190,25 +283,50 @@ def translate(
             dry_run=True,
         )
 
+    source_hash = compute_source_hash(input_path)
+    cp_path = checkpoint_path(input_path, settings, source_hash)
+    identity = build_identity(input_path, settings, source_hash)
+
+    expected_ids = {entry.id for entry in entries}
+    translations: dict[int, str] = load_checkpoint(cp_path, identity, expected_ids)
+
+    if translations and verbose:
+        print(f"Resuming from checkpoint: {cp_path} ({len(translations)} entries)")
+
     client = openai.OpenAI(api_key=settings.api_key)
-    translations: dict[int, str] = {}
     total_usage = Usage()
     start = time.perf_counter()
 
     try:
         for index, batch in enumerate(batches):
-            result = _translate_batch_with_retry(
+            missing_targets = batch.target_ids - translations.keys()
+            if not missing_targets:
+                if progress_callback:
+                    progress_callback(index + 1, len(batches))
+                continue
+
+            batch_to_translate = batch
+            if missing_targets != batch.target_ids:
+                batch_to_translate = Batch(
+                    entries=batch.entries, target_ids=missing_targets
+                )
+
+            batch_result = _translate_batch_recursive(
                 client,
                 settings,
-                batch,
-                progress_callback=progress_callback,
-                batch_index=index,
-                total_batches=len(batches),
+                batch_to_translate,
+                index,
+                len(batches),
+                cp_path,
+                identity,
+                translations,
             )
-            for entry_id in batch.target_ids:
-                translations[entry_id] = result.translations[entry_id]
-            total_usage.input_tokens += result.usage.input_tokens
-            total_usage.output_tokens += result.usage.output_tokens
+
+            total_usage.input_tokens += batch_result.usage.input_tokens
+            total_usage.output_tokens += batch_result.usage.output_tokens
+
+            if progress_callback:
+                progress_callback(index + 1, len(batches))
     except TranslationError:
         raise
     except Exception as exc:
@@ -229,6 +347,8 @@ def translate(
         raise
     except Exception as exc:
         raise TranslationError(f"Could not write output file: {exc}") from exc
+
+    remove_checkpoint(cp_path)
 
     stats = TranslationStats(
         duration_seconds=duration,

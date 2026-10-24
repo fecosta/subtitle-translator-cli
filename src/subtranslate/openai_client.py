@@ -4,9 +4,32 @@ import json
 from typing import Any
 
 import openai
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import Settings
 from .models import Batch, TranslationResult, Usage
+
+
+class _TranslationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = Field(..., description="Original subtitle identifier")
+    text: str = Field(..., description="Translated subtitle text")
+
+
+class _BatchTranslationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subtitles: list[_TranslationItem] = Field(
+        ..., description="Translated subtitle entries for the target ids"
+    )
+
+
+_JSON_SCHEMA = {
+    "name": "subtitle_translation",
+    "strict": True,
+    "schema": _BatchTranslationResponse.model_json_schema(),
+}
 
 SYSTEM_PROMPT = (
     "You are an expert subtitle translator. "
@@ -42,6 +65,18 @@ def _build_user_message(batch: Batch, source_lang: str, target_lang: str) -> str
     )
 
 
+def _supports_json_schema(model: str) -> bool:
+    """Return True for model families known to support strict JSON schemas."""
+    name = model.lower()
+    return name.startswith(("gpt-4o", "gpt-4.1"))
+
+
+def _response_format(model: str) -> dict[str, Any]:
+    if _supports_json_schema(model):
+        return {"type": "json_schema", "json_schema": _JSON_SCHEMA}
+    return {"type": "json_object"}
+
+
 def translate_batch(
     client: openai.OpenAI,
     settings: Settings,
@@ -59,7 +94,7 @@ def translate_batch(
                 ),
             },
         ],
-        response_format={"type": "json_object"},
+        response_format=_response_format(settings.model),
         temperature=0.3,
     )
 
@@ -93,7 +128,9 @@ def translate_batch(
         result[entry_id] = text
 
     # Drop any context entries the model returned despite the prompt.
-    result = {entry_id: text for entry_id, text in result.items() if entry_id in batch.target_ids}
+    result = {
+        entry_id: text for entry_id, text in result.items() if entry_id in batch.target_ids
+    }
     returned_ids = set(result.keys())
 
     if returned_ids != batch.target_ids:

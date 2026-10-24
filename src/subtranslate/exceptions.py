@@ -10,6 +10,10 @@ class TranslationError(SubtranslateError):
     """Raised when translation fails after retries."""
 
 
+class BatchValidationError(TranslationError):
+    """Raised when a batch repeatedly returns invalid model output."""
+
+
 class OutputExistsError(SubtranslateError):
     """Raised when the output file already exists and --force was not given."""
 

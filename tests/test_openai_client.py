@@ -8,7 +8,7 @@ import pytest
 
 from subtranslate.config import Settings
 from subtranslate.models import Batch, SubtitleEntry
-from subtranslate.openai_client import SYSTEM_PROMPT, translate_batch
+from subtranslate.openai_client import SYSTEM_PROMPT, _response_format, translate_batch
 
 
 @dataclass
@@ -181,3 +181,15 @@ def test_translate_batch_rejects_non_list_subtitles() -> None:
 
     with pytest.raises(ValueError, match="list"):
         translate_batch(client, settings, batch)
+
+
+def test_structured_output_for_supported_models() -> None:
+    fmt = _response_format("gpt-4.1-mini")
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["strict"] is True
+    assert "schema" in fmt["json_schema"]
+
+
+def test_json_object_fallback_for_unsupported_models() -> None:
+    fmt = _response_format("gpt-3.5-turbo")
+    assert fmt["type"] == "json_object"
