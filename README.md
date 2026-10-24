@@ -66,10 +66,21 @@ The CLI works with any locally mounted filesystem, including NAS mounts. It does
 
 ## Output naming
 
-If `--output` is omitted, the default output path is derived from the input:
+If `--output` is omitted, the default output path is derived from the input filename. The CLI recognizes common English-language suffixes case-insensitively, replaces the source language tag with the target language, and preserves recognized subtitle attributes:
 
-- `movie.en.srt` -> `movie.pt-BR.srt`
-- `movie.srt` -> `movie.pt-BR.srt`
+| Input | Default output |
+|---|---|
+| `movie.en.srt` | `movie.pt-BR.srt` |
+| `movie.eng.srt` | `movie.pt-BR.srt` |
+| `movie.english.srt` | `movie.pt-BR.srt` |
+| `movie.srt` | `movie.pt-BR.srt` |
+| `movie.en.forced.srt` | `movie.pt-BR.forced.srt` |
+| `movie.eng.sdh.srt` | `movie.pt-BR.sdh.srt` |
+
+Recognized source-language tags: `en`, `eng`, `english`.
+Recognized subtitle attributes: `forced`, `sdh`, `hi`, `cc`.
+
+Use `--output` to override the generated path. The original subtitle file is never modified.
 
 ## API configuration
 

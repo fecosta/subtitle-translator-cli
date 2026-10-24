@@ -26,6 +26,7 @@ from .exceptions import (
 )
 from .fileio import atomic_write_path
 from .models import Batch, SubtitleEntry, TranslationResult, Usage
+from .naming import default_output_path
 from .openai_client import translate_batch
 from .srt import load_subtitles
 
@@ -365,10 +366,7 @@ def translate(
 
 def _default_output_path(input_path: Path, target_lang: str) -> Path:
     """Generate a default output path based on the input name."""
-    suffix = target_lang.replace(" ", "-").replace("(", "").replace(")", "")
-    stem = input_path.stem
-    new_stem = f"{stem[:-3]}.{suffix}" if stem.lower().endswith(".en") else f"{stem}.{suffix}"
-    return input_path.with_stem(new_stem)
+    return default_output_path(input_path, target_lang)
 
 
 def get_dry_run_info(input_path: Path, settings: Settings) -> DryRunInfo:

@@ -15,13 +15,14 @@ from .exceptions import (
     SubtitleError,
     TranslationError,
 )
+from .naming import default_output_path
 from .progress import (
     ProgressReporter,
     print_dry_run,
     print_header,
     print_summary,
 )
-from .translator import TranslationStats, _default_output_path, get_dry_run_info, translate
+from .translator import TranslationStats, get_dry_run_info, translate
 
 app = typer.Typer(name="subtranslate", help="Translate SRT subtitles with OpenAI")
 debug_app = typer.Typer(name="debug", help="Debug helpers for subtitle translation")
@@ -70,7 +71,7 @@ def translate_command(
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
-    output_path = output or _default_output_path(input_file, to)
+    output_path = output or default_output_path(input_file, to)
 
     print_header(input_file, from_, to, settings.model)
 
