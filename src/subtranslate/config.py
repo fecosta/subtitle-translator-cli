@@ -38,6 +38,26 @@ def get_settings(
     if not api_key:
         raise ConfigurationError("OPENAI_API_KEY is not set.")
 
+    return _build_settings(api_key, model, source_lang, target_lang, batch_size)
+
+
+def get_scan_settings(
+    model: str | None = None,
+    source_lang: str | None = None,
+    target_lang: str | None = None,
+    batch_size: int | None = None,
+) -> Settings:
+    """Return settings for read-only scanning without requiring an API key."""
+    return _build_settings("", model, source_lang, target_lang, batch_size)
+
+
+def _build_settings(
+    api_key: str,
+    model: str | None,
+    source_lang: str | None,
+    target_lang: str | None,
+    batch_size: int | None,
+) -> Settings:
     return Settings(
         api_key=api_key,
         model=model or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL,

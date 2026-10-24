@@ -5,8 +5,15 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
-from .config import DEFAULT_BATCH_SIZE, DEFAULT_SOURCE_LANG, DEFAULT_TARGET_LANG, get_settings
+from .config import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_SOURCE_LANG,
+    DEFAULT_TARGET_LANG,
+    get_scan_settings,
+    get_settings,
+)
 from .debug import translate_batch_by_id, translate_batch_by_range
 from .exceptions import (
     ConfigurationError,
@@ -22,6 +29,7 @@ from .progress import (
     print_header,
     print_summary,
 )
+from .scanner import ScanStatus, scan_library
 from .translator import TranslationStats, get_dry_run_info, translate
 
 app = typer.Typer(name="subtranslate", help="Translate SRT subtitles with OpenAI")
@@ -132,6 +140,120 @@ def translate_command(
         reporter.stop()
 
     print_summary(stats, output_path)
+
+
+@app.command("scan")
+def scan_command(
+    library_path: Path = typer.Argument(  # noqa: B008
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Root directory of the movie library",
+    ),
+    to: str = typer.Option(DEFAULT_TARGET_LANG, "--to", help="Target language"),  # noqa: B008
+    from_: str = typer.Option(  # noqa: B008
+        DEFAULT_SOURCE_LANG,
+        "--from",
+        help="Source language",
+        show_default=True,
+    ),
+    model: str | None = typer.Option(None, "--model", help="OpenAI model"),  # noqa: B008
+    batch_size: int = typer.Option(  # noqa: B008
+        DEFAULT_BATCH_SIZE,
+        "--batch-size",
+        help="Number of subtitles per translation batch",
+        min=1,
+        max=200,
+    ),
+    require_mount: bool = typer.Option(  # noqa: B008
+        False,
+        "--require-mount",
+        help="Require the library path to be a mounted filesystem",
+    ),
+    include_variants: bool = typer.Option(  # noqa: B008
+        False,
+        "--include-variants",
+        help="Include forced/sdh/hi/cc variants as translation sources",
+    ),
+) -> None:
+    """Recursively scan a library and produce a read-only translation plan."""
+    try:
+        settings = get_scan_settings(
+            model=model,
+            source_lang=from_,
+            target_lang=to,
+            batch_size=batch_size,
+        )
+    except ConfigurationError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    try:
+        result = scan_library(
+            library_path,
+            settings,
+            require_mount=require_mount,
+            include_variants=include_variants,
+        )
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    console.print("[bold]Subtitle Library Scan[/bold]\n")
+
+    summary = Table(show_header=False)
+    summary.add_row("Library:", str(library_path.resolve()))
+    summary.add_row("Language:", f"{from_} -> {to}")
+    summary.add_row("Model:", settings.model)
+    summary.add_row("Directories scanned:", f"{result.directories_scanned}")
+    summary.add_row("English subtitle files:", f"{result.english_files}")
+    summary.add_row("Portuguese subtitle files:", f"{result.portuguese_files}")
+    summary.add_row("Eligible translations:", f"{result.eligible_count}")
+    summary.add_row("Skipped:", f"{result.skipped_count}")
+    summary.add_row("Ambiguous:", f"{result.ambiguous_count}")
+    summary.add_row("Errors:", f"{result.error_count}")
+    summary.add_row(
+        "Estimated input tokens:",
+        f"{result.total_estimated_input_tokens:,}",
+    )
+    summary.add_row(
+        "Estimated output tokens:",
+        f"{result.total_estimated_output_tokens:,}",
+    )
+    if result.total_estimated_cost_usd is not None:
+        summary.add_row("Estimated total cost:", f"${result.total_estimated_cost_usd:.4f}")
+    else:
+        summary.add_row("Estimated total cost:", "unknown (no pricing configured)")
+    console.print(summary)
+    console.print()
+
+    table = Table(title="Per-movie decisions")
+    table.add_column("Movie", no_wrap=True)
+    table.add_column("Status")
+    table.add_column("Reason", overflow="fold")
+
+    def _movie_label(item) -> str:
+        try:
+            path = item.source or item.movie_dir / item.movie_name
+            return str(path.resolve().relative_to(library_path.resolve()))
+        except ValueError:
+            return str(item.source or item.movie_dir / item.movie_name)
+
+    for item in result.items:
+        status_color = {
+            ScanStatus.TRANSLATE: "green",
+            ScanStatus.SKIP: "yellow",
+            ScanStatus.AMBIGUOUS: "magenta",
+            ScanStatus.ERROR: "red",
+        }.get(item.status, "white")
+        table.add_row(
+            _movie_label(item),
+            f"[{status_color}]{item.status}[/{status_color}]",
+            item.reason,
+        )
+    console.print(table)
 
 
 @debug_app.command("batch-by-id")
