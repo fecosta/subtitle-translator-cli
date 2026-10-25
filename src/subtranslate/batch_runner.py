@@ -131,6 +131,7 @@ def execute_batch(
     max_cost_usd: float | None = None,
     require_mount: bool = False,
     include_variants: bool = False,
+    mount_point: Path | None = None,
     verbose: bool = False,
 ) -> BatchResult:
     """Execute a batch translation plan with locking, resumability, and cost controls."""
@@ -147,6 +148,7 @@ def execute_batch(
             settings,
             require_mount=require_mount,
             include_variants=include_variants,
+            mount_point=mount_point,
         )
 
         if max_cost_usd is not None:
@@ -283,6 +285,7 @@ def build_batch_plan(
     *,
     require_mount: bool = False,
     include_variants: bool = False,
+    mount_point: Path | None = None,
 ) -> ScanResult:
     """Build the read-only translation plan used for confirmation and cost checks."""
     return scan_library(
@@ -290,4 +293,5 @@ def build_batch_plan(
         settings,
         require_mount=require_mount,
         include_variants=include_variants,
+        mount_point=mount_point,
     )

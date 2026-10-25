@@ -190,6 +190,53 @@ def test_scan_require_mount_rejects_unmounted_directory(
         scan_library(library, scan_settings, require_mount=True)
 
 
+def test_scan_mount_point_accepts_nested_library(
+    tmp_path: Path, scan_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mount_point = tmp_path / "nas"
+    mount_point.mkdir()
+    library = mount_point / "media" / "movies"
+    library.mkdir(parents=True)
+    _write_srt(library / "Movie" / "Movie.en.srt")
+
+    def fake_ismount(path: str | os.PathLike[str]) -> bool:
+        return str(path) == str(mount_point.resolve())
+
+    monkeypatch.setattr(os.path, "ismount", fake_ismount)
+
+    result = scan_library(library, scan_settings, mount_point=mount_point)
+    assert result.eligible_count == 1
+
+
+def test_scan_mount_point_rejects_unmounted_point(
+    tmp_path: Path, scan_settings: Settings
+) -> None:
+    mount_point = tmp_path / "nas"
+    mount_point.mkdir()
+    library = mount_point / "media" / "movies"
+    library.mkdir(parents=True)
+
+    with pytest.raises(FileNotFoundError):
+        scan_library(library, scan_settings, mount_point=mount_point)
+
+
+def test_scan_mount_point_rejects_library_outside_mount(
+    tmp_path: Path, scan_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mount_point = tmp_path / "nas"
+    mount_point.mkdir()
+    library = tmp_path / "other" / "movies"
+    library.mkdir(parents=True)
+
+    def fake_ismount(path: str | os.PathLike[str]) -> bool:
+        return str(path) == str(mount_point.resolve())
+
+    monkeypatch.setattr(os.path, "ismount", fake_ismount)
+
+    with pytest.raises(FileNotFoundError):
+        scan_library(library, scan_settings, mount_point=mount_point)
+
+
 def test_scan_estimates_cost_for_known_model(
     tmp_path: Path, scan_settings: Settings
 ) -> None:

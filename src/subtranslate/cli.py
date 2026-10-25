@@ -186,6 +186,15 @@ def scan_command(
         "--include-variants",
         help="Include forced/sdh/hi/cc variants as translation sources",
     ),
+    mount_point: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--mount-point",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Require the library path to be under this specific mount point",
+    ),
 ) -> None:
     """Recursively scan a library and produce a read-only translation plan."""
     try:
@@ -205,6 +214,7 @@ def scan_command(
             settings,
             require_mount=require_mount,
             include_variants=include_variants,
+            mount_point=mount_point,
         )
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
@@ -290,12 +300,25 @@ def coverage_command(
         "--require-mount",
         help="Require the library path to be under a mounted filesystem",
     ),
+    mount_point: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--mount-point",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Require the library path to be under this specific mount point",
+    ),
 ) -> None:
     """Recursively inspect a library and report external SRT coverage."""
     is_json = output_format == "json"
 
     try:
-        result = scan_coverage(library_path, require_mount=require_mount)
+        result = scan_coverage(
+            library_path,
+            require_mount=require_mount,
+            mount_point=mount_point,
+        )
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         if is_json:
             print(json.dumps({"error": str(exc)}, ensure_ascii=False))
@@ -468,6 +491,15 @@ def batch_command(
         "--include-variants",
         help="Include forced/sdh/hi/cc variants as translation sources",
     ),
+    mount_point: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--mount-point",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Require the library path to be under this specific mount point",
+    ),
     max_cost_usd: float | None = typer.Option(  # noqa: B008
         None,
         "--max-cost-usd",
@@ -498,6 +530,7 @@ def batch_command(
             settings,
             require_mount=require_mount,
             include_variants=include_variants,
+            mount_point=mount_point,
         )
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
@@ -560,6 +593,7 @@ def batch_command(
             max_cost_usd=max_cost_usd,
             require_mount=require_mount,
             include_variants=include_variants,
+            mount_point=mount_point,
             verbose=verbose,
         )
     except ConfigurationError as exc:

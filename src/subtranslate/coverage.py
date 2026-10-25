@@ -89,6 +89,21 @@ def is_under_mount(path: Path) -> bool:
     return False
 
 
+def is_under_specific_mount(library_path: Path, mount_point: Path) -> bool:
+    """Return True when mount_point is mounted and library_path is under it."""
+    resolved_library = library_path.resolve()
+    resolved_mount = mount_point.resolve()
+    if not resolved_mount.exists():
+        return False
+    if not resolved_mount.is_dir():
+        return False
+    if not os.path.ismount(resolved_mount):
+        return False
+    if resolved_mount == resolved_library:
+        return True
+    return resolved_library.is_relative_to(resolved_mount)
+
+
 def _candidate_movie_names(parsed: SubtitleName) -> frozenset[str]:
     """Possible video basenames a subtitle may belong to.
 
@@ -180,6 +195,7 @@ def scan_coverage(
     library_path: Path,
     *,
     require_mount: bool = False,
+    mount_point: Path | None = None,
 ) -> CoverageResult:
     """Recursively inspect a movie library and report external SRT coverage."""
     if library_path.is_symlink():
@@ -190,6 +206,10 @@ def scan_coverage(
         raise FileNotFoundError(f"Library path does not exist: {library_path}")
     if not library_path.is_dir():
         raise NotADirectoryError(f"Library path is not a directory: {library_path}")
+    if mount_point is not None and not is_under_specific_mount(library_path, mount_point):
+        raise FileNotFoundError(
+            f"Library path is not under the required mount point: {mount_point}"
+        )
     if require_mount and not is_under_mount(library_path):
         raise FileNotFoundError(
             f"Library path is not a mounted filesystem: {library_path}"

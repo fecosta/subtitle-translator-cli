@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Settings
-from .coverage import is_under_mount
+from .coverage import is_under_mount, is_under_specific_mount
 from .exceptions import SubtitleError
 from .naming import SubtitleName, parse_subtitle_name
 from .translator import DryRunInfo, get_dry_run_info
@@ -127,6 +127,7 @@ def scan_library(
     *,
     require_mount: bool = False,
     include_variants: bool = False,
+    mount_point: Path | None = None,
 ) -> ScanResult:
     """Recursively scan a library and build a read-only translation plan."""
     if library_path.is_symlink():
@@ -136,6 +137,10 @@ def scan_library(
         raise FileNotFoundError(f"Library path does not exist: {library_path}")
     if not library_path.is_dir():
         raise NotADirectoryError(f"Library path is not a directory: {library_path}")
+    if mount_point is not None and not is_under_specific_mount(library_path, mount_point):
+        raise FileNotFoundError(
+            f"Library path is not under the required mount point: {mount_point}"
+        )
     if require_mount and not is_under_mount(library_path):
         raise FileNotFoundError(
             f"Library path is not a mounted filesystem: {library_path}"

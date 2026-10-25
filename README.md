@@ -104,7 +104,9 @@ Recognized Portuguese tags: `pt-BR`, `pt_BR`, `pob` (confirmed Brazilian), `pt`,
 
 By default `forced`, `sdh`, `hi`, and `cc` variants are excluded from translation. Use `--include-variants` to treat them as sources.
 
-Use `--require-mount` to fail closed when the library path is not under a mounted filesystem. The path itself does not need to be the mount point; a parent such as `/mnt/nas/data` is sufficient when scanning `/mnt/nas/data/media/movies`.
+Use `--require-mount` to fail closed when the library path is not under any mounted filesystem. The path itself does not need to be the mount point; a parent such as `/mnt/nas/data` is sufficient when scanning `/mnt/nas/data/media/movies`.
+
+Use `--mount-point /mnt/nas/data` when you want to validate that the library is under a *specific* mount point, not just any mounted filesystem. This is the safest option for the homelab NAS.
 
 ## Subtitle coverage discovery
 
@@ -189,6 +191,11 @@ If you want to be extra sure the NAS mount is present:
 
 ```bash
 uv run subtranslate scan /mnt/nas/data/media/movies --require-mount
+
+# Validate against the specific NAS mount point
+uv run subtranslate coverage /mnt/nas/data/media/movies --mount-point /mnt/nas/data
+uv run subtranslate scan /mnt/nas/data/media/movies --mount-point /mnt/nas/data
+uv run subtranslate batch /mnt/nas/data/media/movies --mount-point /mnt/nas/data
 ```
 
 Translate a small test set (limit the batch to a few movies by temporarily moving others out of the scan path, or run `batch` and review the plan before confirming):
@@ -233,7 +240,7 @@ Translation cost depends on subtitle length, batch size, and model pricing. The 
 - **Output already exists**: use `--force` to overwrite, or remove the existing file first.
 - **Malformed SRT**: ensure the file is valid UTF-8 SRT with correct timestamps. Malformed files are reported as scan errors.
 - **Ambiguous source**: when a movie folder has multiple English SRT files (e.g., `Movie.en.srt` and `Movie.eng.srt`), the movie is skipped. Keep only the desired source or use `--output` with `translate`.
-- **NAS permission errors / empty mount**: verify the mount and directory permissions; the CLI will report filesystem errors without remounting. Use `--require-mount` to fail closed when the mount is unavailable.
+- **NAS permission errors / empty mount**: verify the mount and directory permissions; the CLI will report filesystem errors without remounting. Use `--require-mount` to fail closed when no ancestor is mounted, or `--mount-point /mnt/nas/data` to validate the specific expected NAS mount.
 
 ## Development commands
 

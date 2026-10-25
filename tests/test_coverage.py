@@ -393,6 +393,75 @@ class TestCliCoverage:
         assert payload["movies"][0]["category"] == CoverageStatus.NO_EXTERNAL_SUBS
 
 
+class TestMountPointValidation:
+    def _fake_ismount_for(self, path: Path) -> callable:
+        def fake_ismount(candidate: str | os.PathLike[str]) -> bool:
+            return str(candidate) == str(path.resolve())
+
+        return fake_ismount
+
+    def test_coverage_accepts_library_under_explicit_mount_point(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mount_point = tmp_path / "nas"
+        mount_point.mkdir()
+        library = mount_point / "media" / "movies"
+        library.mkdir(parents=True)
+        _touch_video(library / "Movie" / "Movie.mkv")
+
+        monkeypatch.setattr(
+            os.path, "ismount", self._fake_ismount_for(mount_point)
+        )
+
+        result = scan_coverage(library, mount_point=mount_point)
+        assert result.directories_scanned >= 1
+        assert len(result.movies) == 1
+
+    def test_coverage_rejects_unmounted_explicit_mount_point(
+        self, tmp_path: Path
+    ) -> None:
+        mount_point = tmp_path / "nas"
+        mount_point.mkdir()
+        library = mount_point / "media" / "movies"
+        library.mkdir(parents=True)
+        _touch_video(library / "Movie" / "Movie.mkv")
+
+        with pytest.raises(FileNotFoundError):
+            scan_coverage(library, mount_point=mount_point)
+
+    def test_coverage_rejects_library_outside_explicit_mount_point(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mount_point = tmp_path / "nas"
+        mount_point.mkdir()
+        library = tmp_path / "other" / "movies"
+        library.mkdir(parents=True)
+        _touch_video(library / "Movie" / "Movie.mkv")
+
+        monkeypatch.setattr(
+            os.path, "ismount", self._fake_ismount_for(mount_point)
+        )
+
+        with pytest.raises(FileNotFoundError):
+            scan_coverage(library, mount_point=mount_point)
+
+    def test_cli_coverage_rejects_unmounted_mount_point(
+        self, tmp_path: Path
+    ) -> None:
+        mount_point = tmp_path / "nas"
+        mount_point.mkdir()
+        library = mount_point / "movies"
+        library.mkdir(parents=True)
+
+        result = runner.invoke(
+            app,
+            ["coverage", str(library), "--mount-point", str(mount_point)],
+        )
+
+        assert result.exit_code == 2
+        assert "not under the required mount point" in result.output
+
+
 class TestRegressionAgainstExistingCommands:
     def test_scan_still_finds_eligible_movie(self, tmp_path: Path) -> None:
         from subtranslate.config import get_scan_settings
