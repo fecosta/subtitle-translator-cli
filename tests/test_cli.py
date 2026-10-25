@@ -95,3 +95,89 @@ def test_cli_debug_batch_by_range(hope_like_batch: Path) -> None:
     assert result.exit_code == 0
     assert "1361" in result.output
     assert "[PT]" in result.output
+
+
+def _write_srt(path: Path, text: str = "Hello") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"1\n00:00:01,000 --> 00:00:02,000\n{text}\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\nLine two\n",
+        encoding="utf-8",
+    )
+
+
+def _fake_translate(input_path: Path, output_path: Path, settings, **kwargs):
+    from subtranslate.srt import load_subtitles, save_subtitles
+
+    entries = load_subtitles(input_path)
+    save_subtitles(entries, output_path)
+    from subtranslate.translator import TranslationStats
+
+    return TranslationStats(
+        total_entries=len(entries),
+        batch_count=1,
+        input_tokens=10,
+        output_tokens=5,
+        estimated_cost_usd=0.0001,
+    )
+
+
+def test_cli_batch_requires_confirmation(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+
+    with patch("subtranslate.cli.execute_batch") as mock_batch:
+        result = runner.invoke(app, ["batch", str(library)], input="n\n")
+
+    assert result.exit_code == 0
+    assert "Batch cancelled" in result.output
+    mock_batch.assert_not_called()
+
+
+def test_cli_batch_runs_with_yes(tmp_path: Path) -> None:
+    from subtranslate.batch_runner import BatchResult
+
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+
+    with patch(
+        "subtranslate.cli.execute_batch", return_value=BatchResult(translated=1)
+    ) as mock_batch:
+        result = runner.invoke(app, ["batch", str(library), "--yes"])
+
+    assert result.exit_code == 0
+    mock_batch.assert_called_once()
+
+
+def test_cli_batch_cost_ceiling_exceeded(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+
+    result = runner.invoke(
+        app, ["batch", str(library), "--max-cost-usd", "0.00001"]
+    )
+
+    assert result.exit_code == 1
+    assert "exceeds ceiling" in result.output
+
+
+def test_cli_batch_unknown_cost_with_ceiling(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+
+    result = runner.invoke(
+        app, ["batch", str(library), "--model", "unknown-model", "--max-cost-usd", "1.0"]
+    )
+
+    assert result.exit_code == 1
+    assert "model pricing is unknown" in result.output
+
+
+def test_cli_batch_requires_mount(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+
+    result = runner.invoke(app, ["batch", str(library), "--require-mount"])
+
+    assert result.exit_code == 2
+    assert "not a mounted filesystem" in result.output
