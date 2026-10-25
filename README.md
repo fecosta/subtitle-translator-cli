@@ -104,7 +104,40 @@ Recognized Portuguese tags: `pt-BR`, `pt_BR`, `pob` (confirmed Brazilian), `pt`,
 
 By default `forced`, `sdh`, `hi`, and `cc` variants are excluded from translation. Use `--include-variants` to treat them as sources.
 
-Use `--require-mount` when the library path itself is a NAS mount point; the command fails closed if the path is not mounted.
+Use `--require-mount` to fail closed when the library path is not under a mounted filesystem. The path itself does not need to be the mount point; a parent such as `/mnt/nas/data` is sufficient when scanning `/mnt/nas/data/media/movies`.
+
+## Subtitle coverage discovery
+
+The `coverage` command discovers movies by their video files and reports which ones already have external subtitles. It is read-only: it does not call the API, translate, rename, or modify files, and it does not inspect embedded subtitles.
+
+```bash
+uv run subtranslate coverage /mnt/nas/data/media/movies
+```
+
+For each discovered movie, it chooses one primary category based on the available external SRT files:
+
+| Category | Meaning |
+|---|---|
+| `HAS_PT_BR` | Confirmed Brazilian Portuguese subtitle exists. |
+| `HAS_GENERIC_PT` | Generic Portuguese subtitle exists; Brazilian variant is not confirmed. |
+| `HAS_EN_ONLY` | Recognized English subtitle exists without Portuguese. |
+| `HAS_UNLABELED` | Unlabeled SRT exists; language is unknown. |
+| `NO_EXTERNAL_SUBS` | No associated external SRT found. |
+| `AMBIGUOUS` | Subtitle-to-video association cannot be established safely. |
+
+Specialized variants (`forced`, `sdh`, `hi`, `cc`) are preserved in the inventory but do not count as full subtitle coverage.
+
+Options:
+
+```bash
+# Show only movies without confirmed Brazilian Portuguese subtitles
+uv run subtranslate coverage /mnt/nas/data/media/movies --missing-only
+
+# Machine-readable JSON output
+uv run subtranslate coverage /mnt/nas/data/media/movies --format json
+```
+
+JSON output contains stable field names, no Rich formatting, and a `summary` block with explicit category counts. The report always notes that it covers external SRT files only; movies marked `NO_EXTERNAL_SUBS` may still contain embedded subtitles.
 
 ## Batch execution
 

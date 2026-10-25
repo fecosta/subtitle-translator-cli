@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 import typer
 from rich.console import Console
@@ -14,6 +15,13 @@ from .config import (
     DEFAULT_TARGET_LANG,
     get_scan_settings,
     get_settings,
+)
+from .coverage import (
+    CoverageResult,
+    CoverageStatus,
+    MovieCoverage,
+    coverage_result_to_dict,
+    scan_coverage,
 )
 from .debug import translate_batch_by_id, translate_batch_by_range
 from .exceptions import (
@@ -255,6 +263,173 @@ def scan_command(
             item.reason,
         )
     console.print(table)
+
+
+@app.command("coverage")
+def coverage_command(
+    library_path: Path = typer.Argument(  # noqa: B008
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Root directory of the movie library",
+    ),
+    missing_only: bool = typer.Option(  # noqa: B008
+        False,
+        "--missing-only",
+        help="Show only movies without confirmed Brazilian Portuguese subtitles",
+    ),
+    output_format: Literal["text", "json"] = typer.Option(  # noqa: B008
+        "text",
+        "--format",
+        help="Output format",
+    ),
+    require_mount: bool = typer.Option(  # noqa: B008
+        False,
+        "--require-mount",
+        help="Require the library path to be under a mounted filesystem",
+    ),
+) -> None:
+    """Recursively inspect a library and report external SRT coverage."""
+    is_json = output_format == "json"
+
+    try:
+        result = scan_coverage(library_path, require_mount=require_mount)
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        if is_json:
+            print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+        else:
+            console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    movies = [
+        movie
+        for movie in result.movies
+        if not missing_only or movie.category != CoverageStatus.HAS_PT_BR
+    ]
+
+    if is_json:
+        payload = coverage_result_to_dict(result, library_path)
+        if missing_only:
+            payload["movies"] = [
+                m for m in payload["movies"] if m["category"] != CoverageStatus.HAS_PT_BR
+            ]
+            payload["movies_discovered"] = len(payload["movies"])
+            payload["summary"] = {
+                status: sum(
+                    1 for m in payload["movies"] if m["category"] == status
+                )
+                for status in CoverageResultSummary.labels()
+            }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    _print_coverage_table(result, library_path, movies)
+
+
+def _print_coverage_table(
+    result: CoverageResult,
+    library_path: Path,
+    movies: list[MovieCoverage],
+) -> None:
+    console.print("[bold]Subtitle Coverage (external SRT only)[/bold]\n")
+
+    summary = Table(show_header=False)
+    summary.add_row("Library:", str(library_path.resolve()))
+    summary.add_row("Directories scanned:", f"{result.directories_scanned}")
+    summary.add_row("Movies discovered:", f"{len(movies)}")
+    summary.add_row(
+        "Has Brazilian Portuguese:",
+        f"{sum(1 for m in movies if m.category == CoverageStatus.HAS_PT_BR)}",
+    )
+    summary.add_row(
+        "Has generic Portuguese:",
+        f"{sum(1 for m in movies if m.category == CoverageStatus.HAS_GENERIC_PT)}",
+    )
+    summary.add_row(
+        "Has English only:",
+        f"{sum(1 for m in movies if m.category == CoverageStatus.HAS_EN_ONLY)}",
+    )
+    summary.add_row(
+        "Has unlabeled subtitles:",
+        f"{sum(1 for m in movies if m.category == CoverageStatus.HAS_UNLABELED)}",
+    )
+    summary.add_row(
+        "No external subtitles:",
+        f"{sum(1 for m in movies if m.category == CoverageStatus.NO_EXTERNAL_SUBS)}",
+    )
+    summary.add_row(
+        "Ambiguous:",
+        f"{sum(1 for m in movies if m.category == CoverageStatus.AMBIGUOUS)}",
+    )
+    summary.add_row("Errors:", f"{len(result.errors)}")
+    console.print(summary)
+    console.print()
+
+    table = Table(title="Per-movie coverage")
+    table.add_column("Movie", no_wrap=True, overflow="fold")
+    table.add_column("Category")
+    table.add_column("Subtitles", overflow="fold")
+
+    resolved_library = library_path.resolve()
+
+    for movie in movies:
+        status_color = {
+            CoverageStatus.HAS_PT_BR: "green",
+            CoverageStatus.HAS_GENERIC_PT: "cyan",
+            CoverageStatus.HAS_EN_ONLY: "blue",
+            CoverageStatus.HAS_UNLABELED: "yellow",
+            CoverageStatus.NO_EXTERNAL_SUBS: "red",
+            CoverageStatus.AMBIGUOUS: "magenta",
+        }.get(movie.category, "white")
+
+        try:
+            label = str(
+                (movie.movie_dir / movie.movie_name).resolve().relative_to(
+                    resolved_library
+                )
+            )
+        except ValueError:
+            label = str(movie.movie_dir / movie.movie_name)
+
+        subtitle_label = _format_subtitle_inventory(movie.subtitles)
+        table.add_row(
+            label,
+            f"[{status_color}]{movie.category}[/{status_color}]",
+            subtitle_label,
+        )
+
+    console.print(table)
+    console.print(
+        "\n[yellow]Note:[/yellow] This report covers external SRT files only. "
+        "Movies without external subtitles may still contain embedded subtitles."
+    )
+
+
+def _format_subtitle_inventory(subtitles: tuple) -> str:
+    if not subtitles:
+        return "-"
+    parts = []
+    for sub in subtitles:
+        tag = sub.language_tag or "unlabeled"
+        if sub.attributes:
+            tag += "." + ".".join(sub.attributes)
+        parts.append(tag)
+    return ", ".join(parts)
+
+
+class CoverageResultSummary:
+    @staticmethod
+    def labels() -> tuple[str, ...]:
+        return (
+            CoverageStatus.HAS_PT_BR,
+            CoverageStatus.HAS_GENERIC_PT,
+            CoverageStatus.HAS_EN_ONLY,
+            CoverageStatus.HAS_UNLABELED,
+            CoverageStatus.NO_EXTERNAL_SUBS,
+            CoverageStatus.AMBIGUOUS,
+        )
 
 
 @app.command("batch")
