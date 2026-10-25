@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +15,25 @@ from .naming import (
 )
 
 VIDEO_EXTENSIONS = frozenset({".mkv", ".mp4", ".avi", ".m4v"})
+
+FFPROBE_TIMEOUT_SECONDS = 60
+
+EMBEDDED_CODEC_TEXT = "text"
+EMBEDDED_CODEC_IMAGE = "image"
+EMBEDDED_CODEC_UNKNOWN = "unknown"
+
+TEXT_SUBTITLE_CODECS = frozenset(
+    {"subrip", "srt", "ass", "ssa", "webvtt", "text", "mov_text"}
+)
+IMAGE_SUBTITLE_CODECS = frozenset(
+    {"hdmv_pgs_subtitle", "dvb_subtitle", "dvd_subtitle", "vobsub", "pgs"}
+)
+
+BRAZILIAN_PORTUGUESE_CODES = frozenset(
+    {"pt-br", "pt_br", "pob", "ptbr", "por-br", "porbr"}
+)
+GENERIC_PORTUGUESE_CODES = frozenset({"pt", "por", "pt-pt", "por-pt"})
+ENGLISH_LANGUAGE_CODES = frozenset({"en", "eng", "english"})
 
 
 class CoverageStatus:
@@ -39,16 +60,39 @@ class SubtitleInventory:
     is_specialized_variant: bool
 
 
+@dataclass(frozen=True, slots=True)
+class EmbeddedSubtitleInventory:
+    """Observed embedded subtitle stream for a movie."""
+
+    stream_index: int
+    subtitle_stream_index: int
+    codec: str
+    codec_kind: str
+    language_tag: str | None
+    title: str
+    is_brazilian_portuguese: bool
+    is_generic_portuguese: bool
+    is_english: bool
+    is_unknown_language: bool
+    is_forced: bool
+    is_sdh: bool
+    is_text: bool
+    is_image: bool
+    is_supported_text: bool
+
+
 @dataclass(slots=True)
 class MovieCoverage:
-    """External subtitle coverage for a single discovered movie."""
+    """Subtitle coverage for a single discovered movie."""
 
     movie_dir: Path
     movie_name: str
     video_paths: tuple[Path, ...]
     category: str
     subtitles: tuple[SubtitleInventory, ...]
+    embedded_subtitles: tuple[EmbeddedSubtitleInventory, ...] = field(default_factory=tuple)
     ambiguous_reasons: tuple[str, ...] = field(default_factory=tuple)
+    probe_error: str | None = None
 
 
 @dataclass(slots=True)
@@ -72,6 +116,53 @@ class CoverageResult:
         }
         for movie in self.movies:
             counts[movie.category] = counts.get(movie.category, 0) + 1
+        return counts
+
+    @property
+    def embedded_summary(self) -> dict[str, int]:
+        """Aggregate counts across all discovered embedded subtitle streams."""
+        counts: dict[str, int] = {
+            "tracks_discovered": 0,
+            "movies_with_embedded_subtitles": 0,
+            "movies_with_probe_error": 0,
+            "brazilian_portuguese": 0,
+            "generic_portuguese": 0,
+            "english": 0,
+            "unknown_language": 0,
+            "forced": 0,
+            "sdh": 0,
+            "text": 0,
+            "image": 0,
+            "supported_text": 0,
+            "unknown_codec": 0,
+        }
+        for movie in self.movies:
+            if movie.probe_error:
+                counts["movies_with_probe_error"] += 1
+            if movie.embedded_subtitles:
+                counts["movies_with_embedded_subtitles"] += 1
+            for stream in movie.embedded_subtitles:
+                counts["tracks_discovered"] += 1
+                if stream.is_brazilian_portuguese:
+                    counts["brazilian_portuguese"] += 1
+                if stream.is_generic_portuguese:
+                    counts["generic_portuguese"] += 1
+                if stream.is_english:
+                    counts["english"] += 1
+                if stream.is_unknown_language:
+                    counts["unknown_language"] += 1
+                if stream.is_forced:
+                    counts["forced"] += 1
+                if stream.is_sdh:
+                    counts["sdh"] += 1
+                if stream.is_text:
+                    counts["text"] += 1
+                if stream.is_image:
+                    counts["image"] += 1
+                if stream.is_supported_text:
+                    counts["supported_text"] += 1
+                if stream.codec_kind == EMBEDDED_CODEC_UNKNOWN:
+                    counts["unknown_codec"] += 1
         return counts
 
 
@@ -102,6 +193,122 @@ def is_under_specific_mount(library_path: Path, mount_point: Path) -> bool:
     if resolved_mount == resolved_library:
         return True
     return resolved_library.is_relative_to(resolved_mount)
+
+
+def normalize_embedded_language(value: str | None) -> str | None:
+    """Normalize an ffprobe language tag to a canonical tag.
+
+    Returns ``pt-BR``, ``pt``, ``en``, or ``None`` when the language cannot be
+    confidently identified as one of those three.
+    """
+    if not value:
+        return None
+    normalized = value.strip().lower().replace("_", "-")
+    if normalized in BRAZILIAN_PORTUGUESE_CODES:
+        return "pt-BR"
+    if normalized in GENERIC_PORTUGUESE_CODES:
+        return "pt"
+    if normalized in ENGLISH_LANGUAGE_CODES:
+        return "en"
+    return None
+
+
+def classify_embedded_codec(codec: str | None) -> tuple[str, bool, bool, bool]:
+    """Return (codec_kind, is_text, is_image, is_supported_text) for a codec name."""
+    name = (codec or "").lower()
+    if name in TEXT_SUBTITLE_CODECS:
+        return EMBEDDED_CODEC_TEXT, True, False, True
+    if name in IMAGE_SUBTITLE_CODECS:
+        return EMBEDDED_CODEC_IMAGE, False, True, False
+    return EMBEDDED_CODEC_UNKNOWN, False, False, False
+
+
+def _title_implies_forced(title: str) -> bool:
+    return "forced" in title.lower()
+
+
+def _title_implies_sdh(title: str) -> bool:
+    lower = title.lower()
+    return any(tag in lower for tag in ("sdh", "hi", "hearing", "deaf"))
+
+
+def _parse_embedded_stream(
+    stream: dict, subtitle_stream_index: int
+) -> EmbeddedSubtitleInventory:
+    tags = stream.get("tags", {}) or {}
+    language_tag = normalize_embedded_language(tags.get("language"))
+    title = (tags.get("title", "") or "").strip()
+    codec = (stream.get("codec_name") or "").lower()
+    codec_kind, is_text, is_image, is_supported_text = classify_embedded_codec(codec)
+    disposition = stream.get("disposition", {}) or {}
+    is_forced = bool(disposition.get("forced")) or _title_implies_forced(title)
+    is_sdh = bool(disposition.get("hearing_impaired")) or _title_implies_sdh(title)
+
+    return EmbeddedSubtitleInventory(
+        stream_index=int(stream.get("index", subtitle_stream_index)),
+        subtitle_stream_index=subtitle_stream_index,
+        codec=codec,
+        codec_kind=codec_kind,
+        language_tag=language_tag,
+        title=title,
+        is_brazilian_portuguese=language_tag == "pt-BR",
+        is_generic_portuguese=language_tag == "pt",
+        is_english=language_tag == "en",
+        is_unknown_language=language_tag is None,
+        is_forced=is_forced,
+        is_sdh=is_sdh,
+        is_text=is_text,
+        is_image=is_image,
+        is_supported_text=is_supported_text,
+    )
+
+
+def probe_video_subtitles(video_path: Path) -> tuple[list[EmbeddedSubtitleInventory], str | None]:
+    """Probe a single video for embedded subtitle streams.
+
+    Returns a list of discovered streams and an optional error message. An error
+    is returned when ffprobe is missing, the probe fails, or the output cannot
+    be parsed. A successful probe with no subtitle streams returns an empty list
+    and no error.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "s",
+                "-show_entries",
+                "stream=index,codec_name:stream_tags=language,title:stream_disposition=forced,hearing_impaired",
+                "-of",
+                "json",
+                str(video_path),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=FFPROBE_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError as exc:
+        return [], f"ffprobe not found: {exc}"
+    except subprocess.TimeoutExpired:
+        return [], f"ffprobe timed out after {FFPROBE_TIMEOUT_SECONDS}s for {video_path.name}"
+    except OSError as exc:
+        return [], f"ffprobe could not be executed: {exc}"
+
+    if result.returncode != 0:
+        return [], f"ffprobe failed for {video_path.name}: {result.stderr.strip()}"
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return [], f"ffprobe output is not valid JSON for {video_path.name}: {exc}"
+
+    streams = data.get("streams", []) or []
+    return [
+        _parse_embedded_stream(stream, index) for index, stream in enumerate(streams)
+    ], None
 
 
 def _candidate_movie_names(parsed: SubtitleName) -> frozenset[str]:
@@ -197,7 +404,12 @@ def scan_coverage(
     require_mount: bool = False,
     mount_point: Path | None = None,
 ) -> CoverageResult:
-    """Recursively inspect a movie library and report external SRT coverage."""
+    """Recursively inspect a movie library and report subtitle coverage.
+
+    Discovers external SRT files and embedded subtitle streams in supported
+    video files. Embedded discovery is read-only: it runs ffprobe but never
+    extracts, translates, or modifies media files.
+    """
     if library_path.is_symlink():
         raise ValueError(f"Library path must not be a symlink: {library_path}")
 
@@ -257,13 +469,24 @@ def scan_coverage(
         for stem in sorted(video_stems):
             subtitles = tuple(associated.get(stem, ()))
             ambiguous_reasons = tuple(ambiguous.get(stem, ()))
+            embedded: list[EmbeddedSubtitleInventory] = []
+            probe_error: str | None = None
+            for video_path in sorted(videos[stem]):
+                streams, error = probe_video_subtitles(video_path)
+                embedded.extend(streams)
+                if error and probe_error is None:
+                    probe_error = error
+            if probe_error:
+                walk_errors.append((root_path / display_names[stem], probe_error))
             movies[(root_path, display_names[stem])] = MovieCoverage(
                 movie_dir=root_path,
                 movie_name=display_names[stem],
                 video_paths=tuple(sorted(videos[stem])),
                 category=_classify(subtitles, ambiguous_reasons),
                 subtitles=subtitles,
+                embedded_subtitles=tuple(embedded),
                 ambiguous_reasons=ambiguous_reasons,
+                probe_error=probe_error,
             )
 
     sorted_movies = tuple(
@@ -298,6 +521,7 @@ def coverage_result_to_dict(
             for path, reason in result.errors
         ],
         "summary": result.summary,
+        "embedded_summary": result.embedded_summary,
         "movies": [
             {
                 "path": _relative(movie.movie_dir),
@@ -317,6 +541,27 @@ def coverage_result_to_dict(
                     }
                     for sub in movie.subtitles
                 ],
+                "embedded_subtitles": [
+                    {
+                        "stream_index": emb.stream_index,
+                        "subtitle_stream_index": emb.subtitle_stream_index,
+                        "codec": emb.codec,
+                        "codec_kind": emb.codec_kind,
+                        "language_tag": emb.language_tag,
+                        "title": emb.title,
+                        "is_brazilian_portuguese": emb.is_brazilian_portuguese,
+                        "is_generic_portuguese": emb.is_generic_portuguese,
+                        "is_english": emb.is_english,
+                        "is_unknown_language": emb.is_unknown_language,
+                        "is_forced": emb.is_forced,
+                        "is_sdh": emb.is_sdh,
+                        "is_text": emb.is_text,
+                        "is_image": emb.is_image,
+                        "is_supported_text": emb.is_supported_text,
+                    }
+                    for emb in movie.embedded_subtitles
+                ],
+                "probe_error": movie.probe_error,
                 "ambiguous_reasons": list(movie.ambiguous_reasons),
             }
             for movie in result.movies

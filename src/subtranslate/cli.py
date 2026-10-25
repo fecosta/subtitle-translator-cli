@@ -20,6 +20,7 @@ from .coverage import (
     CoverageResult,
     CoverageStatus,
     MovieCoverage,
+    SubtitleInventory,
     coverage_result_to_dict,
     scan_coverage,
 )
@@ -310,7 +311,7 @@ def coverage_command(
         help="Require the library path to be under this specific mount point",
     ),
 ) -> None:
-    """Recursively inspect a library and report external SRT coverage."""
+    """Recursively inspect a library and report external and embedded subtitles."""
     is_json = output_format == "json"
 
     try:
@@ -349,10 +350,11 @@ def _print_coverage_table(
     library_path: Path,
     movies: list[MovieCoverage],
 ) -> None:
-    console.print("[bold]Subtitle Coverage (external SRT only)[/bold]\n")
+    console.print("[bold]Subtitle Coverage[/bold]\n")
 
     summary = Table(show_header=False)
     all_movies = result.movies
+    embedded_summary = result.embedded_summary
     summary.add_row("Library:", str(library_path.resolve()))
     summary.add_row("Directories scanned:", f"{result.directories_scanned}")
     summary.add_row("Movies discovered:", f"{len(all_movies)}")
@@ -386,13 +388,24 @@ def _print_coverage_table(
         f"{sum(1 for m in all_movies if m.category == CoverageStatus.AMBIGUOUS)}",
     )
     summary.add_row("Errors:", f"{len(result.errors)}")
+    summary.add_row(
+        "Embedded tracks discovered:", f"{embedded_summary['tracks_discovered']}"
+    )
+    summary.add_row(
+        "Movies with embedded subtitles:",
+        f"{embedded_summary['movies_with_embedded_subtitles']}",
+    )
+    summary.add_row(
+        "Movies with probe errors:", f"{embedded_summary['movies_with_probe_error']}"
+    )
     console.print(summary)
     console.print()
 
     table = Table(title="Per-movie coverage")
-    table.add_column("Movie", no_wrap=True, overflow="fold")
-    table.add_column("Category")
-    table.add_column("Subtitles", overflow="fold")
+    table.add_column("Movie", overflow="fold", min_width=20, max_width=60)
+    table.add_column("Category", min_width=12)
+    table.add_column("External", overflow="fold", min_width=15)
+    table.add_column("Embedded", overflow="fold", min_width=15)
 
     resolved_library = library_path.resolve()
 
@@ -416,21 +429,23 @@ def _print_coverage_table(
         except ValueError:
             label = str(movie.movie_dir / movie.movie_name)
 
-        subtitle_label = _format_subtitle_inventory(movie.subtitles)
+        external_label = _format_subtitle_inventory(movie.subtitles)
+        embedded_label = _format_embedded_inventory(movie)
         table.add_row(
             label,
             f"[{status_color}]{movie.category}[/{status_color}]",
-            subtitle_label,
+            external_label,
+            embedded_label,
         )
 
     console.print(table)
     console.print(
-        "\n[yellow]Note:[/yellow] This report covers external SRT files only. "
-        "Movies without external subtitles may still contain embedded subtitles."
+        "\n[yellow]Note:[/yellow] Categories reflect external SRT files. "
+        "Embedded tracks are reported separately and are not yet translatable."
     )
 
 
-def _format_subtitle_inventory(subtitles: tuple) -> str:
+def _format_subtitle_inventory(subtitles: tuple[SubtitleInventory, ...]) -> str:
     if not subtitles:
         return "-"
     parts = []
@@ -439,6 +454,31 @@ def _format_subtitle_inventory(subtitles: tuple) -> str:
         if sub.attributes:
             tag += "." + ".".join(sub.attributes)
         parts.append(tag)
+    return ", ".join(parts)
+
+
+def _format_embedded_inventory(movie: MovieCoverage) -> str:
+    if movie.probe_error:
+        return "[red]probe error[/red]"
+    if not movie.embedded_subtitles:
+        return "-"
+    parts = []
+    for emb in movie.embedded_subtitles:
+        label = emb.language_tag or "unknown"
+        if emb.codec:
+            label += f" ({emb.codec})"
+        tags = []
+        if emb.is_forced:
+            tags.append("forced")
+        if emb.is_sdh:
+            tags.append("sdh")
+        if emb.is_image:
+            tags.append("image")
+        if emb.is_unknown_language:
+            tags.append("unknown-lang")
+        if tags:
+            label += " [" + ", ".join(tags) + "]"
+        parts.append(label)
     return ", ".join(parts)
 
 
