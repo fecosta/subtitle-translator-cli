@@ -78,10 +78,13 @@ class LibraryLock:
 
     def __exit__(self, *exc_info: object) -> None:
         if self._fd is not None:
-            with contextlib.suppress(OSError):
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
-                os.close(self._fd)
-            self._fd = None
+            try:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(self._fd)
+                self._fd = None
 
 
 def _lock_path(library_path: Path) -> Path:

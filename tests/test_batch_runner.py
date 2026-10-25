@@ -222,6 +222,40 @@ def test_batch_cost_ceiling_stops_mid_batch(
     assert result.budget_exceeded == 1
 
 
+def _unknown_cost_translate(input_path: Path, output_path: Path, settings, **kwargs):
+    from subtranslate.srt import load_subtitles, save_subtitles
+
+    entries = load_subtitles(input_path)
+    save_subtitles(entries, output_path)
+    return TranslationStats(
+        total_entries=len(entries),
+        batch_count=1,
+        input_tokens=10,
+        output_tokens=5,
+        estimated_cost_usd=None,
+    )
+
+
+def test_batch_unknown_runtime_cost_stops_under_ceiling(
+    tmp_path: Path, batch_settings
+) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+    _write_srt(library / "Movie B" / "Movie.B.en.srt")
+
+    with patch("subtranslate.batch_runner.translate", _unknown_cost_translate):
+        result = execute_batch(
+            library,
+            batch_settings,
+            _plan(library, batch_settings),
+            max_cost_usd=1.0,
+        )
+
+    assert result.translated == 1
+    assert result.budget_exceeded == 1
+    assert result.total_estimated_cost_usd is None
+
+
 def test_batch_result_exit_code_on_failure(tmp_path: Path, batch_settings) -> None:
     library = tmp_path / "library"
     _write_srt(library / "Movie A" / "Movie.A.en.srt")

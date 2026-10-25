@@ -181,3 +181,15 @@ def test_cli_batch_requires_mount(tmp_path: Path) -> None:
 
     assert result.exit_code == 2
     assert "not a mounted filesystem" in result.output
+
+
+def test_cli_batch_exits_nonzero_on_scan_errors(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    bad = library / "Movie A" / "Movie.A.en.srt"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("not valid srt", encoding="utf-8")
+
+    result = runner.invoke(app, ["batch", str(library), "--yes"])
+
+    assert result.exit_code == 1
+    assert "Errors:" in result.output or "planned_error" in result.output

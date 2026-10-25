@@ -351,7 +351,7 @@ def batch_command(
 
     if plan.eligible_count == 0:
         console.print("[yellow]No eligible translations.[/yellow]")
-        raise typer.Exit()
+        raise typer.Exit(code=1 if plan.error_count else 0)
 
     if max_cost_usd is not None:
         if plan.total_estimated_cost_usd is None:
