@@ -82,6 +82,87 @@ Recognized subtitle attributes: `forced`, `sdh`, `hi`, `cc`.
 
 Use `--output` to override the generated path. The original subtitle file is never modified.
 
+## Library scanning
+
+The `scan` command recursively discovers SRT subtitles and produces a read-only translation plan. No API calls are made.
+
+```bash
+uv run subtranslate scan /mnt/nas/data/media/movies
+```
+
+The scanner groups subtitles by directory and movie basename, then decides per movie:
+
+| Status | Meaning |
+|---|---|
+| `TRANSLATE` | One unambiguous English source exists and no matching Portuguese subtitle was found. |
+| `SKIP` | A matching Portuguese subtitle already exists, no recognized English source was found, or the source is a specialized variant. |
+| `AMBIGUOUS` | Multiple plausible English sources exist for the same movie. |
+| `ERROR` | The file could not be read or parsed. |
+
+Recognized English source tags: `en`, `eng`, `english`.
+Recognized Portuguese tags: `pt-BR`, `pt_BR`, `pob` (confirmed Brazilian), `pt`, `por` (generic).
+
+By default `forced`, `sdh`, `hi`, and `cc` variants are excluded from translation. Use `--include-variants` to treat them as sources.
+
+Use `--require-mount` when the library path itself is a NAS mount point; the command fails closed if the path is not mounted.
+
+## Batch execution
+
+The `batch` command runs `scan`, shows the plan and estimated cost, asks for confirmation, and translates all eligible files sequentially.
+
+```bash
+uv run subtranslate batch /mnt/nas/data/media/movies
+```
+
+Noninteractive execution (use only with explicit authorization):
+
+```bash
+uv run subtranslate batch /mnt/nas/data/media/movies --yes
+```
+
+### Cost controls
+
+Show the estimated cost before translation and set a spending ceiling:
+
+```bash
+uv run subtranslate batch /mnt/nas/data/media/movies --max-cost-usd 5.00
+```
+
+- The command refuses to start if the estimated plan exceeds the ceiling.
+- It fails closed if pricing is unknown for the selected model.
+- It rechecks the remaining budget before starting each movie and stops if the next file would exceed the ceiling.
+- Reported spending is an estimate based on actual token usage; retries or resumed checkpoints can shift the real cost.
+
+### Existing subtitles and resume
+
+- Movies with a matching Portuguese subtitle are skipped.
+- Existing Portuguese subtitles are never overwritten.
+- Source subtitle files are never modified.
+- Each movie uses the existing checkpoint mechanism, so interrupted translations resume without re-translating completed batches.
+- A library lock prevents concurrent `batch` runs on the same path.
+
+## NAS example on the Mac Mini
+
+The Fedora Asahi Mac Mini mounts the PiNAS at `/mnt/nas/data`.
+
+Safe read-only scan of the entire movie library:
+
+```bash
+uv run subtranslate scan /mnt/nas/data/media/movies
+```
+
+If you want to be extra sure the NAS mount is present:
+
+```bash
+uv run subtranslate scan /mnt/nas/data/media/movies --require-mount
+```
+
+Translate a small test set (limit the batch to a few movies by temporarily moving others out of the scan path, or run `batch` and review the plan before confirming):
+
+```bash
+uv run subtranslate batch /mnt/nas/data/media/movies --max-cost-usd 1.00
+```
+
 ## API configuration
 
 - `OPENAI_API_KEY` is required.
@@ -108,16 +189,17 @@ For supported OpenAI models (gpt-4o and gpt-4.1 families), the CLI requests stri
 
 ## Cost considerations
 
-Translation cost depends on subtitle length, batch size, and model pricing. The CLI reports actual token usage after translation and shows an estimated cost for known models during dry-runs. Use `--dry-run` to preview the expected number of batches and tokens before spending API credits.
+Translation cost depends on subtitle length, batch size, and model pricing. The CLI reports actual token usage after translation and shows an estimated cost for known models during dry-runs and batch planning. Cost estimates are approximate; actual OpenAI billing may differ slightly due to retries, resumed checkpoints, or model pricing updates. Use `--dry-run` or `scan` to preview costs before spending API credits.
 
 ## Troubleshooting
 
 - **Missing API key**: export `OPENAI_API_KEY`.
 - **Rate limits**: translation uses bounded retries with exponential backoff; large files may still hit rate limits.
 - **Batch failed**: the error message includes the batch number, expected ids, and checkpoint path. Rerun the same command to resume.
-- **Output already exists**: use `--force` to overwrite.
-- **Malformed SRT**: ensure the file is valid UTF-8 SRT with correct timestamps.
-- **NAS permission errors**: verify the mount and directory permissions; the CLI will report filesystem errors without remounting.
+- **Output already exists**: use `--force` to overwrite, or remove the existing file first.
+- **Malformed SRT**: ensure the file is valid UTF-8 SRT with correct timestamps. Malformed files are reported as scan errors.
+- **Ambiguous source**: when a movie folder has multiple English SRT files (e.g., `Movie.en.srt` and `Movie.eng.srt`), the movie is skipped. Keep only the desired source or use `--output` with `translate`.
+- **NAS permission errors / empty mount**: verify the mount and directory permissions; the CLI will report filesystem errors without remounting. Use `--require-mount` to fail closed when the mount is unavailable.
 
 ## Development commands
 
