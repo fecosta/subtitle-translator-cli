@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 import typer
+from rich import markup
 from rich.console import Console
 from rich.table import Table
 
@@ -432,7 +433,7 @@ def _print_coverage_table(
         external_label = _format_subtitle_inventory(movie.subtitles)
         embedded_label = _format_embedded_inventory(movie)
         table.add_row(
-            label,
+            markup.escape(label),
             f"[{status_color}]{movie.category}[/{status_color}]",
             external_label,
             embedded_label,
@@ -453,7 +454,7 @@ def _format_subtitle_inventory(subtitles: tuple[SubtitleInventory, ...]) -> str:
         tag = sub.language_tag or "unlabeled"
         if sub.attributes:
             tag += "." + ".".join(sub.attributes)
-        parts.append(tag)
+        parts.append(markup.escape(tag))
     return ", ".join(parts)
 
 
@@ -477,8 +478,8 @@ def _format_embedded_inventory(movie: MovieCoverage) -> str:
         if emb.is_unknown_language:
             tags.append("unknown-lang")
         if tags:
-            label += " [" + ", ".join(tags) + "]"
-        parts.append(label)
+            label += " (" + ", ".join(tags) + ")"
+        parts.append(markup.escape(label))
     return ", ".join(parts)
 
 

@@ -24,6 +24,23 @@ from subtranslate.coverage import (
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _stub_ffprobe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure tests do not depend on ffprobe being installed locally."""
+
+    def fake_run(*args, **kwargs):
+        class _Result:
+            pass
+
+        result = _Result()
+        result.stdout = json.dumps({"streams": []})
+        result.stderr = ""
+        result.returncode = 0
+        return result
+
+    monkeypatch.setattr("subtranslate.coverage.subprocess.run", fake_run)
+
+
 def _write_srt(path: Path, text: str = "Hello") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -886,6 +903,97 @@ class TestEmbeddedSerialization:
 
 
 class TestCliEmbeddedCoverage:
+    def test_title_sdh_false_positive_avoided(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = tmp_path / "library"
+        _touch_video(library / "Movie" / "Movie.mkv")
+        _patch_ffprobe(
+            monkeypatch,
+            _ffprobe_json(
+                [
+                    _stream(0, 0, codec="subrip", language="eng", title="Chinese (Simplified)"),
+                    _stream(1, 1, codec="subrip", language="eng", title="SDH"),
+                ]
+            ),
+        )
+
+        result = scan_coverage(library)
+
+        movie = result.movies[0]
+        assert movie.embedded_subtitles[0].is_sdh is False
+        assert movie.embedded_subtitles[1].is_sdh is True
+
+    def test_probe_nonzero_exit_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = tmp_path / "library"
+        _touch_video(library / "Movie" / "Movie.mkv")
+        _patch_ffprobe(monkeypatch, "error", returncode=1)
+
+        result = scan_coverage(library)
+
+        assert "ffprobe failed" in result.movies[0].probe_error
+        assert result.embedded_summary["movies_with_probe_error"] == 1
+
+    def test_probe_oserror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = tmp_path / "library"
+        _touch_video(library / "Movie" / "Movie.mkv")
+
+        def raise_oserror(*_args, **_kwargs):
+            raise OSError("permission denied")
+
+        _patch_ffprobe_side_effect(monkeypatch, raise_oserror)
+
+        result = scan_coverage(library)
+
+        assert "could not be executed" in result.movies[0].probe_error
+        assert result.embedded_summary["movies_with_probe_error"] == 1
+
+    def test_probe_valid_json_wrong_shape(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = tmp_path / "library"
+        _touch_video(library / "Movie" / "Movie.mkv")
+        _patch_ffprobe(monkeypatch, json.dumps([]))
+
+        result = scan_coverage(library)
+
+        assert "unexpected shape" in result.movies[0].probe_error
+        assert result.embedded_summary["movies_with_probe_error"] == 1
+
+    def test_ffprobe_argv_uses_argument_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = tmp_path / "library"
+        video = library / "Movie" / "Movie.mkv"
+        _touch_video(video)
+        calls: list[list[str]] = []
+
+        def capture_run(args, **_kwargs):
+            calls.append(list(args))
+            class _Result:
+                pass
+            result = _Result()
+            result.stdout = json.dumps({"streams": []})
+            result.stderr = ""
+            result.returncode = 0
+            return result
+
+        monkeypatch.setattr("subtranslate.coverage.subprocess.run", capture_run)
+        scan_coverage(library)
+
+        assert len(calls) == 1
+        argv = calls[0]
+        assert argv[0] == "ffprobe"
+        assert "-select_streams" in argv
+        assert "s" in argv
+        assert "-of" in argv
+        assert "json" in argv
+        assert str(video) in argv
+
     def test_cli_shows_embedded_subtitles(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -893,14 +1001,14 @@ class TestCliEmbeddedCoverage:
         _touch_video(library / "Movie" / "Movie.mkv")
         _patch_ffprobe(
             monkeypatch,
-            _ffprobe_json([_stream(0, 0, codec="subrip", language="eng")]),
+            _ffprobe_json([_stream(0, 0, codec="subrip", language="eng", forced=1)]),
         )
 
         result = runner.invoke(app, ["coverage", str(library)])
 
         assert result.exit_code == 0
-        assert "Embedded" in result.output
-        assert "eng" in result.output or "Embedded tracks" in result.output
+        assert "en (subrip)" in result.output
+        assert "(forced)" in result.output
 
     def test_cli_shows_probe_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

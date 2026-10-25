@@ -136,7 +136,8 @@ Specialized variants (`forced`, `sdh`, `hi`, `cc`) are preserved in the inventor
 
 - Stream index and subtitle-relative index.
 - Codec and codec kind (`text`, `image`, or `unknown`).
-- Normalized language tag (`pt-BR`, `pt`, `en`, or `unknown`).
+- Normalized language tag (`pt-BR`, `pt`, `en`, or `null` when unknown).
+- Raw language tag as reported by `ffprobe`.
 - Track title.
 - Forced and hearing-impaired (SDH) disposition flags.
 
@@ -160,7 +161,7 @@ uv run subtranslate coverage /mnt/nas/data/media/movies --format json
 JSON output contains stable field names, no Rich formatting, and both `summary` (external SRT categories) and `embedded_summary` blocks with explicit counts. Each movie object includes:
 
 - `subtitles`: existing external SRT inventory.
-- `embedded_subtitles`: list of discovered embedded streams with `stream_index`, `subtitle_stream_index`, `codec`, `codec_kind`, `language_tag`, `title`, and boolean flags.
+- `embedded_subtitles`: list of discovered embedded streams with `stream_index`, `subtitle_stream_index`, `codec`, `codec_kind`, `language_tag`, `raw_language_tag`, `title`, and boolean flags.
 - `probe_error`: `null` on success, or an error message when `ffprobe` failed, timed out, or returned malformed output.
 
 Movies marked `NO_EXTERNAL_SUBS` may still contain embedded subtitles; the embedded inventory is reported separately and does not change the external-only category.
@@ -280,7 +281,9 @@ uv build
 - Requires an active internet connection and valid OpenAI credentials.
 - Cost estimates are approximate and based on built-in pricing for common models.
 - Embedded subtitle discovery is read-only; embedded tracks are not extracted or translated in this release.
-- Language and codec detection depend on metadata provided by `ffprobe`; missing or incorrect tags are reported as `unknown`.
+- Language and codec detection depend on metadata provided by `ffprobe`; missing tags are reported as `unknown`.
+- Tracks whose language tag is outside the recognized `pt-BR`/`pt`/`en` set are reported as `unknown` while preserving the raw tag.
+- Some containers store BCP-47 language tags in fields that `ffprobe` may not expose as the `language` tag, so real Brazilian Portuguese tracks may appear as generic `pt`.
 
 ## License
 

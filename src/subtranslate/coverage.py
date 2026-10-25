@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -69,6 +70,7 @@ class EmbeddedSubtitleInventory:
     codec: str
     codec_kind: str
     language_tag: str | None
+    raw_language_tag: str | None
     title: str
     is_brazilian_portuguese: bool
     is_generic_portuguese: bool
@@ -223,20 +225,24 @@ def classify_embedded_codec(codec: str | None) -> tuple[str, bool, bool, bool]:
     return EMBEDDED_CODEC_UNKNOWN, False, False, False
 
 
+_FORCED_TITLE_RE = re.compile(r"\bforced\b", re.IGNORECASE)
+_SDH_TITLE_RE = re.compile(r"\b(sdh|hi|cc)\b|\bhearing\b|\bdeaf\b", re.IGNORECASE)
+
+
 def _title_implies_forced(title: str) -> bool:
-    return "forced" in title.lower()
+    return bool(_FORCED_TITLE_RE.search(title))
 
 
 def _title_implies_sdh(title: str) -> bool:
-    lower = title.lower()
-    return any(tag in lower for tag in ("sdh", "hi", "hearing", "deaf"))
+    return bool(_SDH_TITLE_RE.search(title))
 
 
 def _parse_embedded_stream(
     stream: dict, subtitle_stream_index: int
 ) -> EmbeddedSubtitleInventory:
     tags = stream.get("tags", {}) or {}
-    language_tag = normalize_embedded_language(tags.get("language"))
+    raw_language = tags.get("language")
+    language_tag = normalize_embedded_language(raw_language)
     title = (tags.get("title", "") or "").strip()
     codec = (stream.get("codec_name") or "").lower()
     codec_kind, is_text, is_image, is_supported_text = classify_embedded_codec(codec)
@@ -250,6 +256,7 @@ def _parse_embedded_stream(
         codec=codec,
         codec_kind=codec_kind,
         language_tag=language_tag,
+        raw_language_tag=raw_language if raw_language else None,
         title=title,
         is_brazilian_portuguese=language_tag == "pt-BR",
         is_generic_portuguese=language_tag == "pt",
@@ -302,13 +309,15 @@ def probe_video_subtitles(video_path: Path) -> tuple[list[EmbeddedSubtitleInvent
 
     try:
         data = json.loads(result.stdout)
+        streams = data.get("streams", []) or []
+        return [
+            _parse_embedded_stream(stream, index)
+            for index, stream in enumerate(streams)
+        ], None
     except json.JSONDecodeError as exc:
         return [], f"ffprobe output is not valid JSON for {video_path.name}: {exc}"
-
-    streams = data.get("streams", []) or []
-    return [
-        _parse_embedded_stream(stream, index) for index, stream in enumerate(streams)
-    ], None
+    except (AttributeError, TypeError, ValueError) as exc:
+        return [], f"ffprobe output has an unexpected shape for {video_path.name}: {exc}"
 
 
 def _candidate_movie_names(parsed: SubtitleName) -> frozenset[str]:
@@ -548,6 +557,7 @@ def coverage_result_to_dict(
                         "codec": emb.codec,
                         "codec_kind": emb.codec_kind,
                         "language_tag": emb.language_tag,
+                        "raw_language_tag": emb.raw_language_tag,
                         "title": emb.title,
                         "is_brazilian_portuguese": emb.is_brazilian_portuguese,
                         "is_generic_portuguese": emb.is_generic_portuguese,
