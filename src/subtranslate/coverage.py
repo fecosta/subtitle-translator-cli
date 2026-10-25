@@ -20,6 +20,7 @@ class CoverageStatus:
     HAS_GENERIC_PT = "HAS_GENERIC_PT"
     HAS_EN_ONLY = "HAS_EN_ONLY"
     HAS_UNLABELED = "HAS_UNLABELED"
+    HAS_SPECIALIZED_ONLY = "HAS_SPECIALIZED_ONLY"
     NO_EXTERNAL_SUBS = "NO_EXTERNAL_SUBS"
     AMBIGUOUS = "AMBIGUOUS"
 
@@ -65,6 +66,7 @@ class CoverageResult:
             CoverageStatus.HAS_GENERIC_PT: 0,
             CoverageStatus.HAS_EN_ONLY: 0,
             CoverageStatus.HAS_UNLABELED: 0,
+            CoverageStatus.HAS_SPECIALIZED_ONLY: 0,
             CoverageStatus.NO_EXTERNAL_SUBS: 0,
             CoverageStatus.AMBIGUOUS: 0,
         }
@@ -73,7 +75,7 @@ class CoverageResult:
         return counts
 
 
-def _is_under_mount(path: Path) -> bool:
+def is_under_mount(path: Path) -> bool:
     """Return True when path is mounted or resides under a non-root mount point."""
     resolved = path.resolve()
     if os.path.ismount(resolved):
@@ -131,7 +133,8 @@ def _associate_subtitles(
 
     for path, parsed, candidates in srts:
         inventory = _inventory(parsed)
-        matches = candidates & video_stems
+        candidate_keys = {candidate.lower() for candidate in candidates}
+        matches = candidate_keys & video_stems
         if len(matches) == 1:
             stem = next(iter(matches))
             associated[stem].append(inventory)
@@ -160,6 +163,8 @@ def _classify(
         return CoverageStatus.HAS_EN_ONLY
     if any(s.is_unlabeled for s in full_subtitles):
         return CoverageStatus.HAS_UNLABELED
+    if subtitles:
+        return CoverageStatus.HAS_SPECIALIZED_ONLY
     return CoverageStatus.NO_EXTERNAL_SUBS
 
 
@@ -185,7 +190,7 @@ def scan_coverage(
         raise FileNotFoundError(f"Library path does not exist: {library_path}")
     if not library_path.is_dir():
         raise NotADirectoryError(f"Library path is not a directory: {library_path}")
-    if require_mount and not _is_under_mount(library_path):
+    if require_mount and not is_under_mount(library_path):
         raise FileNotFoundError(
             f"Library path is not a mounted filesystem: {library_path}"
         )
@@ -205,12 +210,16 @@ def scan_coverage(
         directories_scanned += 1
 
         videos: dict[str, list[Path]] = defaultdict(list)
+        display_names: dict[str, str] = {}
         srts: list[tuple[Path, SubtitleName, frozenset[str]]] = []
 
         for filename in files:
             file_path = root_path / filename
             if _is_video_file(file_path):
-                videos[file_path.stem].append(file_path)
+                key = file_path.stem.lower()
+                videos[key].append(file_path)
+                if key not in display_names:
+                    display_names[key] = file_path.stem
             elif _is_srt_file(file_path):
                 try:
                     parsed = parse_subtitle_name(file_path)
@@ -228,9 +237,9 @@ def scan_coverage(
         for stem in sorted(video_stems):
             subtitles = tuple(associated.get(stem, ()))
             ambiguous_reasons = tuple(ambiguous.get(stem, ()))
-            movies[(root_path, stem)] = MovieCoverage(
+            movies[(root_path, display_names[stem])] = MovieCoverage(
                 movie_dir=root_path,
-                movie_name=stem,
+                movie_name=display_names[stem],
                 video_paths=tuple(sorted(videos[stem])),
                 category=_classify(subtitles, ambiguous_reasons),
                 subtitles=subtitles,

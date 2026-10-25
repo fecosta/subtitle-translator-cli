@@ -122,6 +122,7 @@ For each discovered movie, it chooses one primary category based on the availabl
 | `HAS_GENERIC_PT` | Generic Portuguese subtitle exists; Brazilian variant is not confirmed. |
 | `HAS_EN_ONLY` | Recognized English subtitle exists without Portuguese. |
 | `HAS_UNLABELED` | Unlabeled SRT exists; language is unknown. |
+| `HAS_SPECIALIZED_ONLY` | Only specialized variants (`forced`/`sdh`/`hi`/`cc`) exist; no full subtitle coverage. |
 | `NO_EXTERNAL_SUBS` | No associated external SRT found. |
 | `AMBIGUOUS` | Subtitle-to-video association cannot be established safely. |
 

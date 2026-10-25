@@ -134,7 +134,7 @@ class TestMovieDiscoveryAndClassification:
         result = scan_coverage(library)
 
         movie = result.movies[0]
-        assert movie.category == CoverageStatus.NO_EXTERNAL_SUBS
+        assert movie.category == CoverageStatus.HAS_SPECIALIZED_ONLY
         assert len(movie.subtitles) == 2
         assert all(sub.is_specialized_variant for sub in movie.subtitles)
 
@@ -158,6 +158,29 @@ class TestMovieDiscoveryAndClassification:
         movie = result.movies[0]
         assert movie.category == CoverageStatus.HAS_PT_BR
         assert len(movie.subtitles) == 2
+
+    @pytest.mark.parametrize("attribute", ["forced", "sdh", "hi", "cc"])
+    def test_coverage_individual_specialized_attributes(
+        self, tmp_path: Path, attribute: str
+    ) -> None:
+        library = tmp_path / "library"
+        _touch_video(library / "Movie" / "Movie.mkv")
+        _write_srt(library / "Movie" / f"Movie.pt-BR.{attribute}.srt")
+
+        result = scan_coverage(library)
+
+        movie = result.movies[0]
+        assert movie.category == CoverageStatus.HAS_SPECIALIZED_ONLY
+        assert movie.subtitles[0].is_specialized_variant
+
+    def test_coverage_case_insensitive_stem_matching(self, tmp_path: Path) -> None:
+        library = tmp_path / "library"
+        _touch_video(library / "Movie" / "Movie.MKV")
+        _write_srt(library / "Movie" / "movie.pt-BR.srt")
+
+        result = scan_coverage(library)
+
+        assert result.movies[0].category == CoverageStatus.HAS_PT_BR
 
 
 class TestEdgeCasesAndSafety:
@@ -271,6 +294,7 @@ class TestResultSerialization:
             CoverageStatus.HAS_GENERIC_PT,
             CoverageStatus.HAS_EN_ONLY,
             CoverageStatus.HAS_UNLABELED,
+            CoverageStatus.HAS_SPECIALIZED_ONLY,
             CoverageStatus.NO_EXTERNAL_SUBS,
             CoverageStatus.AMBIGUOUS,
         }
@@ -348,6 +372,26 @@ class TestCliCoverage:
         assert result.exit_code == 2
         assert "not a mounted filesystem" in result.output
 
+    def test_cli_coverage_json_missing_only_preserves_totals(
+        self, tmp_path: Path
+    ) -> None:
+        library = tmp_path / "library"
+        _touch_video(library / "HasPT" / "HasPT.mkv")
+        _write_srt(library / "HasPT" / "HasPT.pt-BR.srt")
+        _touch_video(library / "Missing" / "Missing.mkv")
+
+        result = runner.invoke(
+            app, ["coverage", str(library), "--missing-only", "--format", "json"]
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["movies_discovered"] == 2
+        assert payload["summary"][CoverageStatus.HAS_PT_BR] == 1
+        assert payload["summary"][CoverageStatus.NO_EXTERNAL_SUBS] == 1
+        assert len(payload["movies"]) == 1
+        assert payload["movies"][0]["category"] == CoverageStatus.NO_EXTERNAL_SUBS
+
 
 class TestRegressionAgainstExistingCommands:
     def test_scan_still_finds_eligible_movie(self, tmp_path: Path) -> None:
@@ -375,3 +419,21 @@ class TestRegressionAgainstExistingCommands:
         settings = get_scan_settings()
         with pytest.raises(FileNotFoundError):
             scan_library(library, settings, require_mount=True)
+
+    def test_scan_require_mount_accepts_path_under_mount(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from subtranslate.config import get_scan_settings
+        from subtranslate.scanner import scan_library
+
+        library = tmp_path / "library"
+        library.mkdir(parents=True)
+
+        def fake_ismount(path: str | os.PathLike[str]) -> bool:
+            return str(path) == str(tmp_path)
+
+        monkeypatch.setattr(os.path, "ismount", fake_ismount)
+
+        settings = get_scan_settings()
+        result = scan_library(library, settings, require_mount=True)
+        assert result.directories_scanned >= 1

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Settings
-from .coverage import _is_under_mount
+from .coverage import is_under_mount
 from .exceptions import SubtitleError
 from .naming import SubtitleName, parse_subtitle_name
 from .translator import DryRunInfo, get_dry_run_info
@@ -136,7 +136,7 @@ def scan_library(
         raise FileNotFoundError(f"Library path does not exist: {library_path}")
     if not library_path.is_dir():
         raise NotADirectoryError(f"Library path is not a directory: {library_path}")
-    if require_mount and not _is_under_mount(library_path):
+    if require_mount and not is_under_mount(library_path):
         raise FileNotFoundError(
             f"Library path is not a mounted filesystem: {library_path}"
         )

@@ -179,7 +179,7 @@ def scan_command(
     require_mount: bool = typer.Option(  # noqa: B008
         False,
         "--require-mount",
-        help="Require the library path to be a mounted filesystem",
+        help="Require the library path to be under a mounted filesystem",
     ),
     include_variants: bool = typer.Option(  # noqa: B008
         False,
@@ -315,13 +315,6 @@ def coverage_command(
             payload["movies"] = [
                 m for m in payload["movies"] if m["category"] != CoverageStatus.HAS_PT_BR
             ]
-            payload["movies_discovered"] = len(payload["movies"])
-            payload["summary"] = {
-                status: sum(
-                    1 for m in payload["movies"] if m["category"] == status
-                )
-                for status in CoverageResultSummary.labels()
-            }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
 
@@ -336,32 +329,38 @@ def _print_coverage_table(
     console.print("[bold]Subtitle Coverage (external SRT only)[/bold]\n")
 
     summary = Table(show_header=False)
+    all_movies = result.movies
     summary.add_row("Library:", str(library_path.resolve()))
     summary.add_row("Directories scanned:", f"{result.directories_scanned}")
-    summary.add_row("Movies discovered:", f"{len(movies)}")
+    summary.add_row("Movies discovered:", f"{len(all_movies)}")
+    summary.add_row("Movies shown:", f"{len(movies)}")
     summary.add_row(
         "Has Brazilian Portuguese:",
-        f"{sum(1 for m in movies if m.category == CoverageStatus.HAS_PT_BR)}",
+        f"{sum(1 for m in all_movies if m.category == CoverageStatus.HAS_PT_BR)}",
     )
     summary.add_row(
         "Has generic Portuguese:",
-        f"{sum(1 for m in movies if m.category == CoverageStatus.HAS_GENERIC_PT)}",
+        f"{sum(1 for m in all_movies if m.category == CoverageStatus.HAS_GENERIC_PT)}",
     )
     summary.add_row(
         "Has English only:",
-        f"{sum(1 for m in movies if m.category == CoverageStatus.HAS_EN_ONLY)}",
+        f"{sum(1 for m in all_movies if m.category == CoverageStatus.HAS_EN_ONLY)}",
     )
     summary.add_row(
         "Has unlabeled subtitles:",
-        f"{sum(1 for m in movies if m.category == CoverageStatus.HAS_UNLABELED)}",
+        f"{sum(1 for m in all_movies if m.category == CoverageStatus.HAS_UNLABELED)}",
+    )
+    summary.add_row(
+        "Has specialized variants only:",
+        f"{sum(1 for m in all_movies if m.category == CoverageStatus.HAS_SPECIALIZED_ONLY)}",
     )
     summary.add_row(
         "No external subtitles:",
-        f"{sum(1 for m in movies if m.category == CoverageStatus.NO_EXTERNAL_SUBS)}",
+        f"{sum(1 for m in all_movies if m.category == CoverageStatus.NO_EXTERNAL_SUBS)}",
     )
     summary.add_row(
         "Ambiguous:",
-        f"{sum(1 for m in movies if m.category == CoverageStatus.AMBIGUOUS)}",
+        f"{sum(1 for m in all_movies if m.category == CoverageStatus.AMBIGUOUS)}",
     )
     summary.add_row("Errors:", f"{len(result.errors)}")
     console.print(summary)
@@ -380,6 +379,7 @@ def _print_coverage_table(
             CoverageStatus.HAS_GENERIC_PT: "cyan",
             CoverageStatus.HAS_EN_ONLY: "blue",
             CoverageStatus.HAS_UNLABELED: "yellow",
+            CoverageStatus.HAS_SPECIALIZED_ONLY: "bright_black",
             CoverageStatus.NO_EXTERNAL_SUBS: "red",
             CoverageStatus.AMBIGUOUS: "magenta",
         }.get(movie.category, "white")
@@ -427,6 +427,7 @@ class CoverageResultSummary:
             CoverageStatus.HAS_GENERIC_PT,
             CoverageStatus.HAS_EN_ONLY,
             CoverageStatus.HAS_UNLABELED,
+            CoverageStatus.HAS_SPECIALIZED_ONLY,
             CoverageStatus.NO_EXTERNAL_SUBS,
             CoverageStatus.AMBIGUOUS,
         )
@@ -460,7 +461,7 @@ def batch_command(
     require_mount: bool = typer.Option(  # noqa: B008
         False,
         "--require-mount",
-        help="Require the library path to be a mounted filesystem",
+        help="Require the library path to be under a mounted filesystem",
     ),
     include_variants: bool = typer.Option(  # noqa: B008
         False,
