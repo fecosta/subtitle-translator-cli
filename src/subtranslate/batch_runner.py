@@ -23,8 +23,8 @@ class BatchError(Exception):
 class BatchItemResult:
     """Outcome for a single planned translation."""
 
-    source: Path
-    output_path: Path
+    source: Path | None
+    output_path: Path | None
     status: str
     reason: str
     stats: TranslationStats | None = None
@@ -38,6 +38,8 @@ class BatchResult:
     translated: int = 0
     skipped: int = 0
     failed: int = 0
+    ambiguous: int = 0
+    errors: int = 0
     budget_exceeded: int = 0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -48,8 +50,8 @@ class BatchResult:
 class LibraryLock:
     """Advisory lock for a library to avoid concurrent batch runs.
 
-    Uses fcntl on Linux/macOS. If fcntl is unavailable the lock degrades to a
-    best-effort PID file check.
+    Uses fcntl on Linux/macOS. The lock file is kept permanently; stale locks
+    are automatically released by the kernel when a process exits.
     """
 
     def __init__(self, lock_path: Path) -> None:
@@ -80,8 +82,6 @@ class LibraryLock:
                 fcntl.flock(self._fd, fcntl.LOCK_UN)
                 os.close(self._fd)
             self._fd = None
-        with contextlib.suppress(OSError):
-            self.lock_path.unlink(missing_ok=True)
 
 
 def _lock_path(library_path: Path) -> Path:
@@ -100,12 +100,34 @@ def _sum_cost(
     return current + addition, False
 
 
+def _record_non_eligible(result: BatchResult, item) -> None:
+    if item.status == ScanStatus.SKIP:
+        status = "planned_skip"
+        result.skipped += 1
+    elif item.status == ScanStatus.AMBIGUOUS:
+        status = "planned_ambiguous"
+        result.ambiguous += 1
+    else:
+        status = "planned_error"
+        result.errors += 1
+    result.items.append(
+        BatchItemResult(
+            source=item.source,
+            output_path=item.output_path,
+            status=status,
+            reason=item.reason,
+        )
+    )
+
+
 def execute_batch(
     library_path: Path,
     settings: Settings,
     plan: ScanResult,
     *,
     max_cost_usd: float | None = None,
+    require_mount: bool = False,
+    include_variants: bool = False,
     verbose: bool = False,
 ) -> BatchResult:
     """Execute a batch translation plan with locking, resumability, and cost controls."""
@@ -114,15 +136,41 @@ def execute_batch(
 
     start = time.perf_counter()
     result = BatchResult()
-    eligible = [item for item in plan.items if item.status == ScanStatus.TRANSLATE]
 
     with LibraryLock(_lock_path(library_path)):
+        # Re-scan under the lock so every decision is based on current state.
+        fresh_plan = scan_library(
+            library_path,
+            settings,
+            require_mount=require_mount,
+            include_variants=include_variants,
+        )
+
+        if max_cost_usd is not None:
+            if fresh_plan.total_estimated_cost_usd is None:
+                raise ConfigurationError(
+                    "Cost ceiling requested but model pricing is unknown."
+                )
+            if fresh_plan.total_estimated_cost_usd > max_cost_usd:
+                raise ConfigurationError(
+                    f"Estimated cost ${fresh_plan.total_estimated_cost_usd:.4f} "
+                    f"exceeds ceiling ${max_cost_usd:.4f}."
+                )
+
+        eligible = [
+            item for item in fresh_plan.items if item.status == ScanStatus.TRANSLATE
+        ]
+
+        for item in fresh_plan.items:
+            if item.status != ScanStatus.TRANSLATE:
+                _record_non_eligible(result, item)
+
         actual_cost: float | None = 0.0
         cost_unknown = False
 
         for index, item in enumerate(eligible):
             output_path = item.output_path
-            if output_path is None:
+            if output_path is None or item.source is None:
                 continue
 
             # Race-condition guard: a file may have appeared since planning.
@@ -142,28 +190,18 @@ def execute_batch(
             if max_cost_usd is not None and item.dry_run_info is not None:
                 estimated_file_cost = item.dry_run_info.estimated_cost_usd
                 if estimated_file_cost is None:
-                    result.items.append(
-                        BatchItemResult(
-                            source=item.source,
-                            output_path=output_path,
-                            status="budget_exceeded",
-                            reason="Cannot verify budget: file cost unknown",
-                        )
+                    _mark_remaining_budget_exceeded(
+                        result, eligible, index,
+                        "Cannot verify budget: file cost unknown"
                     )
-                    result.budget_exceeded += len(eligible) - index
                     cost_unknown = True
                     break
                 projected, _ = _sum_cost(actual_cost, estimated_file_cost)
                 if projected is not None and projected > max_cost_usd:
-                    result.items.append(
-                        BatchItemResult(
-                            source=item.source,
-                            output_path=output_path,
-                            status="budget_exceeded",
-                            reason=f"Budget would exceed ${max_cost_usd:.4f}",
-                        )
+                    _mark_remaining_budget_exceeded(
+                        result, eligible, index,
+                        f"Budget would exceed ${max_cost_usd:.4f}"
                     )
-                    result.budget_exceeded += len(eligible) - index
                     break
 
             try:
@@ -206,9 +244,34 @@ def execute_batch(
             result.total_input_tokens += stats.input_tokens
             result.total_output_tokens += stats.output_tokens
 
+            if max_cost_usd is not None and cost_unknown:
+                _mark_remaining_budget_exceeded(
+                    result, eligible, index + 1,
+                    "Cannot verify budget: runtime cost unknown"
+                )
+                break
+
     result.duration_seconds = time.perf_counter() - start
     result.total_estimated_cost_usd = None if cost_unknown else actual_cost
     return result
+
+
+def _mark_remaining_budget_exceeded(
+    result: BatchResult,
+    eligible: list,
+    start_index: int,
+    reason: str,
+) -> None:
+    for remaining in eligible[start_index:]:
+        result.items.append(
+            BatchItemResult(
+                source=remaining.source,
+                output_path=remaining.output_path,
+                status="budget_exceeded",
+                reason=reason,
+            )
+        )
+        result.budget_exceeded += 1
 
 
 def build_batch_plan(

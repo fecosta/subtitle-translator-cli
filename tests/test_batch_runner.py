@@ -70,7 +70,7 @@ def test_batch_skips_existing_portuguese(tmp_path: Path, batch_settings) -> None
         result = execute_batch(library, batch_settings, _plan(library, batch_settings))
 
     assert result.translated == 0
-    assert result.skipped == 0  # skipped at planning stage, not execution
+    assert result.skipped == 1
 
 
 def test_batch_handles_api_failure_and_continues(
@@ -167,20 +167,17 @@ def test_batch_no_api_calls_during_planning(tmp_path: Path, batch_settings) -> N
     assert plan.eligible_count == 1
 
 
-def test_batch_cost_ceiling_per_file(tmp_path: Path, batch_settings) -> None:
+def test_batch_cost_ceiling_exceeded_by_plan(tmp_path: Path, batch_settings) -> None:
     library = tmp_path / "library"
     _write_srt(library / "Movie A" / "Movie.A.en.srt")
 
-    with patch("subtranslate.batch_runner.translate", _fake_translate):
-        result = execute_batch(
+    with pytest.raises(ConfigurationError):
+        execute_batch(
             library,
             batch_settings,
             _plan(library, batch_settings),
             max_cost_usd=0.00001,
         )
-
-    assert result.translated == 0
-    assert result.budget_exceeded == 1
 
 
 def test_batch_cost_unknown_with_ceiling(tmp_path: Path) -> None:
@@ -188,9 +185,40 @@ def test_batch_cost_unknown_with_ceiling(tmp_path: Path) -> None:
     _write_srt(library / "Movie A" / "Movie.A.en.srt")
     settings = get_settings(model="unknown-model", target_lang="pt-BR")
 
-    result = execute_batch(library, settings, _plan(library, settings), max_cost_usd=1.0)
+    with pytest.raises(ConfigurationError):
+        execute_batch(library, settings, _plan(library, settings), max_cost_usd=1.0)
 
-    assert result.translated == 0
+
+def _expensive_translate(input_path: Path, output_path: Path, settings, **kwargs):
+    from subtranslate.srt import load_subtitles, save_subtitles
+
+    entries = load_subtitles(input_path)
+    save_subtitles(entries, output_path)
+    return TranslationStats(
+        total_entries=len(entries),
+        batch_count=1,
+        input_tokens=100,
+        output_tokens=50,
+        estimated_cost_usd=0.0002,
+    )
+
+
+def test_batch_cost_ceiling_stops_mid_batch(
+    tmp_path: Path, batch_settings
+) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+    _write_srt(library / "Movie B" / "Movie.B.en.srt")
+
+    with patch("subtranslate.batch_runner.translate", _expensive_translate):
+        result = execute_batch(
+            library,
+            batch_settings,
+            _plan(library, batch_settings),
+            max_cost_usd=0.00025,
+        )
+
+    assert result.translated == 1
     assert result.budget_exceeded == 1
 
 

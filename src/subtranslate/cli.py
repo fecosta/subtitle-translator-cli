@@ -382,6 +382,8 @@ def batch_command(
             settings,
             plan,
             max_cost_usd=max_cost_usd,
+            require_mount=require_mount,
+            include_variants=include_variants,
             verbose=verbose,
         )
     except ConfigurationError as exc:
@@ -392,7 +394,7 @@ def batch_command(
         raise typer.Exit(code=2) from exc
 
     _print_batch_summary(result)
-    if result.failed or result.budget_exceeded:
+    if result.failed or result.budget_exceeded or result.errors:
         raise typer.Exit(code=1)
 
 
@@ -406,6 +408,10 @@ def _print_batch_summary(result: BatchResult) -> None:
     table.add_row("Translated:", f"{result.translated}")
     table.add_row("Skipped:", f"{result.skipped}")
     table.add_row("Failed:", f"{result.failed}")
+    if result.ambiguous:
+        table.add_row("Ambiguous:", f"{result.ambiguous}")
+    if result.errors:
+        table.add_row("Errors:", f"{result.errors}")
     if result.budget_exceeded:
         table.add_row("Budget exceeded:", f"{result.budget_exceeded}")
     table.add_row("Input tokens:", f"{result.total_input_tokens:,}")
@@ -417,11 +423,14 @@ def _print_batch_summary(result: BatchResult) -> None:
     table.add_row("Duration:", f"{result.duration_seconds:.1f}s")
     console.print(table)
 
-    if any(item.status in {"failed", "budget_exceeded"} for item in result.items):
+    if any(
+        item.status in {"failed", "budget_exceeded", "planned_error"}
+        for item in result.items
+    ):
         console.print("\n[bold]Per-file issues[/bold]")
         issues = Table("Movie", "Status", "Reason")
         for item in result.items:
-            if item.status in {"failed", "budget_exceeded"}:
+            if item.status in {"failed", "budget_exceeded", "planned_error"}:
                 issues.add_row(
                     str(item.source),
                     item.status,
