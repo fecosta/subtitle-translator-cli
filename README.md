@@ -161,7 +161,7 @@ uv run subtranslate coverage /mnt/nas/data/media/movies --format json
 JSON output contains stable field names, no Rich formatting, and both `summary` (external SRT categories) and `embedded_summary` blocks with explicit counts. Each movie object includes:
 
 - `subtitles`: existing external SRT inventory.
-- `embedded_subtitles`: list of discovered embedded streams with `stream_index`, `subtitle_stream_index`, `codec`, `codec_kind`, `language_tag`, `raw_language_tag`, `title`, and boolean flags.
+- `embedded_subtitles`: list of discovered embedded streams with `stream_index`, `subtitle_stream_index`, `video_file`, `codec`, `codec_kind`, `language_tag`, `raw_language_tag`, `title`, and boolean flags.
 - `probe_error`: `null` on success, or an error message when `ffprobe` failed, timed out, or returned malformed output.
 
 Movies marked `NO_EXTERNAL_SUBS` may still contain embedded subtitles; the embedded inventory is reported separately and does not change the external-only category.

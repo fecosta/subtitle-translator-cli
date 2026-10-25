@@ -902,6 +902,89 @@ class TestEmbeddedSerialization:
         assert payload["embedded_summary"]["tracks_discovered"] == 1
 
 
+class TestMultipleVideoAssociation:
+    def test_multiple_videos_same_stem_keep_embedded_streams_separate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = tmp_path / "library"
+        _touch_video(library / "Movie" / "Movie.mkv")
+        _touch_video(library / "Movie" / "Movie.mp4")
+
+        def fake_run(args, **_kwargs):
+            video_name = Path(args[-1]).name
+            if video_name == "Movie.mkv":
+                streams = [_stream(0, 0, codec="subrip", language="pt-BR")]
+            else:
+                streams = [_stream(0, 0, codec="subrip", language="eng")]
+
+            class _Result:
+                pass
+
+            result = _Result()
+            result.stdout = _ffprobe_json(streams)
+            result.stderr = ""
+            result.returncode = 0
+            return result
+
+        monkeypatch.setattr("subtranslate.coverage.subprocess.run", fake_run)
+
+        result = scan_coverage(library)
+
+        movie = result.movies[0]
+        assert len(movie.video_paths) == 2
+        files = {emb.video_file for emb in movie.embedded_subtitles}
+        assert files == {"Movie.mkv", "Movie.mp4"}
+        pt_br = [emb for emb in movie.embedded_subtitles if emb.is_brazilian_portuguese]
+        english = [emb for emb in movie.embedded_subtitles if emb.is_english]
+        assert len(pt_br) == 1
+        assert pt_br[0].video_file == "Movie.mkv"
+        assert len(english) == 1
+        assert english[0].video_file == "Movie.mp4"
+
+    def test_external_subtitle_classification_unchanged_with_multiple_videos(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = tmp_path / "library"
+        _touch_video(library / "Movie" / "Movie.mkv")
+        _touch_video(library / "Movie" / "Movie.mp4")
+        _write_srt(library / "Movie" / "Movie.pt-BR.srt")
+        _patch_ffprobe(monkeypatch, _ffprobe_json([]))
+
+        result = scan_coverage(library)
+
+        movie = result.movies[0]
+        assert movie.category == CoverageStatus.HAS_PT_BR
+        assert len(movie.subtitles) == 1
+
+    def test_json_includes_video_file_per_embedded_stream(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = tmp_path / "library"
+        _touch_video(library / "Movie" / "Movie.mkv")
+        _touch_video(library / "Movie" / "Movie.mp4")
+
+        def fake_run(args, **_kwargs):
+            streams = [_stream(0, 0, codec="subrip", language="eng")]
+
+            class _Result:
+                pass
+
+            result = _Result()
+            result.stdout = _ffprobe_json(streams)
+            result.stderr = ""
+            result.returncode = 0
+            return result
+
+        monkeypatch.setattr("subtranslate.coverage.subprocess.run", fake_run)
+
+        result = scan_coverage(library)
+        payload = coverage_result_to_dict(result, library)
+        video_files = {
+            emb["video_file"] for emb in payload["movies"][0]["embedded_subtitles"]
+        }
+        assert video_files == {"Movie.mkv", "Movie.mp4"}
+
+
 class TestCliEmbeddedCoverage:
     def test_title_sdh_false_positive_avoided(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

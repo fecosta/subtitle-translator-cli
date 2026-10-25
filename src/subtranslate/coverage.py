@@ -67,6 +67,7 @@ class EmbeddedSubtitleInventory:
 
     stream_index: int
     subtitle_stream_index: int
+    video_file: str
     codec: str
     codec_kind: str
     language_tag: str | None
@@ -238,7 +239,7 @@ def _title_implies_sdh(title: str) -> bool:
 
 
 def _parse_embedded_stream(
-    stream: dict, subtitle_stream_index: int
+    stream: dict, subtitle_stream_index: int, video_path: Path
 ) -> EmbeddedSubtitleInventory:
     tags = stream.get("tags", {}) or {}
     raw_language = tags.get("language")
@@ -253,6 +254,7 @@ def _parse_embedded_stream(
     return EmbeddedSubtitleInventory(
         stream_index=int(stream.get("index", subtitle_stream_index)),
         subtitle_stream_index=subtitle_stream_index,
+        video_file=video_path.name,
         codec=codec,
         codec_kind=codec_kind,
         language_tag=language_tag,
@@ -311,7 +313,7 @@ def probe_video_subtitles(video_path: Path) -> tuple[list[EmbeddedSubtitleInvent
         data = json.loads(result.stdout)
         streams = data.get("streams", []) or []
         return [
-            _parse_embedded_stream(stream, index)
+            _parse_embedded_stream(stream, index, video_path)
             for index, stream in enumerate(streams)
         ], None
     except json.JSONDecodeError as exc:
@@ -554,6 +556,7 @@ def coverage_result_to_dict(
                     {
                         "stream_index": emb.stream_index,
                         "subtitle_stream_index": emb.subtitle_stream_index,
+                        "video_file": emb.video_file,
                         "codec": emb.codec,
                         "codec_kind": emb.codec_kind,
                         "language_tag": emb.language_tag,

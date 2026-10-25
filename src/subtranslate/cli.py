@@ -463,6 +463,7 @@ def _format_embedded_inventory(movie: MovieCoverage) -> str:
         return "[red]probe error[/red]"
     if not movie.embedded_subtitles:
         return "-"
+    show_source = len(movie.video_paths) > 1
     parts = []
     for emb in movie.embedded_subtitles:
         label = emb.language_tag or "unknown"
@@ -479,6 +480,8 @@ def _format_embedded_inventory(movie: MovieCoverage) -> str:
             tags.append("unknown-lang")
         if tags:
             label += " (" + ", ".join(tags) + ")"
+        if show_source:
+            label = f"{emb.video_file}: {label}"
         parts.append(markup.escape(label))
     return ", ".join(parts)
 
