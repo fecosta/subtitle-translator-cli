@@ -183,6 +183,20 @@ def test_cli_batch_requires_mount(tmp_path: Path) -> None:
     assert "not a mounted filesystem" in result.output
 
 
+def test_cli_batch_rejects_unmounted_mount_point(tmp_path: Path) -> None:
+    mount_point = tmp_path / "nas"
+    mount_point.mkdir()
+    library = mount_point / "movies"
+    library.mkdir()
+
+    result = runner.invoke(
+        app, ["batch", str(library), "--mount-point", str(mount_point)]
+    )
+
+    assert result.exit_code == 2
+    assert "not under the required mount point" in result.output
+
+
 def test_cli_batch_exits_nonzero_on_scan_errors(tmp_path: Path) -> None:
     library = tmp_path / "library"
     bad = library / "Movie A" / "Movie.A.en.srt"
