@@ -25,9 +25,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .coverage import (
+    VIDEO_EXTENSIONS,
     EmbeddedSubtitleInventory,
     MovieCoverage,
     scan_coverage,
+    scan_single_video,
 )
 from .exceptions import OutputExistsError, SubtitleError
 from .fileio import atomic_write_path
@@ -155,18 +157,22 @@ def _extract_track(
     Raises ExtractionFailedError on any extraction or validation failure.
     Raises OutputExistsError when the target already exists (race).
     """
-    # Use an explicit .srt extension so ffmpeg selects the muxer and pysubs2
-    # can parse the temporary file. The random prefix keeps it from looking
-    # like a final subtitle and it is always deleted in the finally block.
+    # Create a private temporary path that does not exist when ffmpeg runs so
+    # that ffmpeg's -n (no-clobber) flag succeeds. The leading dot keeps a
+    # leaked temp file from looking like a final subtitle, and the .srt suffix
+    # lets ffmpeg select the SRT muxer and lets pysubs2 parse the result.
     fd, tmp_path = tempfile.mkstemp(
-        suffix=".extracting.srt",
-        prefix=f"{output_path.stem}.",
+        suffix=".srt",
+        prefix=f".{output_path.stem}.extract-",
         dir=output_path.parent,
     )
     os.close(fd)
     tmp = Path(tmp_path)
 
     try:
+        # Ensure ffmpeg sees a non-existent output path for -n.
+        with contextlib.suppress(OSError):
+            tmp.unlink()
         try:
             result = _run_ffmpeg(
                 [
@@ -255,24 +261,34 @@ def extract_embedded(
     """Extract eligible embedded English subtitles to external .en.srt files.
 
     ``path`` may be a library root, a single movie directory, or a single video
-    file. When a video file is given, its parent directory is scanned and only
-    that video is processed.
+    file. When a video file is given, only that video is probed and only
+    external SRT files in the same directory are considered.
     """
     if path.is_symlink():
         raise ValueError(f"Path must not be a symlink: {path}")
 
+    if not path.exists():
+        raise FileNotFoundError(f"Path does not exist: {path}")
+
     if path.is_file():
-        library_path = path.parent
+        if path.suffix.lower() not in VIDEO_EXTENSIONS:
+            raise ValueError(
+                f"Unsupported video extension: {path.suffix} "
+                f"(supported: {', '.join(sorted(VIDEO_EXTENSIONS))})"
+            )
+        coverage = scan_single_video(
+            path,
+            require_mount=require_mount,
+            mount_point=mount_point,
+        )
         target_video = path.resolve()
     else:
-        library_path = path
+        coverage = scan_coverage(
+            path,
+            require_mount=require_mount,
+            mount_point=mount_point,
+        )
         target_video = None
-
-    coverage = scan_coverage(
-        library_path,
-        require_mount=require_mount,
-        mount_point=mount_point,
-    )
 
     result = ExtractionResult(
         movies_scanned=0,

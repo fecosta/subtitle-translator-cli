@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -332,7 +334,7 @@ class TestSkipReasons:
         assert result.performed == 1
         assert (video.parent / "Movie.en.srt").exists()
 
-    def test_skips_when_output_already_exists(
+    def test_skips_when_external_english_exists(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         library = tmp_path / "library"
@@ -354,7 +356,7 @@ class TestSkipReasons:
         )
         assert existing.read_text() == "do not overwrite"
 
-    def test_skips_case_insensitive_output_collision(
+    def test_skips_case_insensitive_external_english_collision(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         library = tmp_path / "library"
@@ -374,6 +376,45 @@ class TestSkipReasons:
         assert (
             result.skipped_reasons[ExtractionSkipReason.HAS_EXTERNAL_ENGLISH] == 1
         )
+
+    def test_skips_second_same_stem_video_when_output_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = tmp_path / "library"
+        mkv = library / "Movie" / "Movie.mkv"
+        mp4 = library / "Movie" / "Movie.mp4"
+        _touch_video(mkv)
+        _touch_video(mp4)
+        _patch_ffprobe(
+            monkeypatch,
+            _ffprobe_json([_stream(0, 0, codec="subrip", language="eng")]),
+        )
+        ffmpeg_calls: list[list[str]] = []
+
+        def capture_ffmpeg(args, **_kwargs):
+            ffmpeg_calls.append(list(args))
+            output_path = Path(args[-1])
+            output_path.write_text(VALID_SRT, encoding="utf-8")
+
+            class _Result:
+                pass
+
+            result = _Result()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        monkeypatch.setattr("subtranslate.extract._run_ffmpeg", capture_ffmpeg)
+
+        result = extract_embedded(library)
+
+        assert result.performed == 1
+        assert result.skipped == 1
+        assert (
+            result.skipped_reasons[ExtractionSkipReason.OUTPUT_EXISTS] == 1
+        )
+        assert len(ffmpeg_calls) == 1
+        assert "Movie.mkv" in ffmpeg_calls[0][ffmpeg_calls[0].index("-i") + 1]
 
     def test_output_exists_race_is_skip_not_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -732,6 +773,254 @@ class TestSinglePathInvocation:
         assert not (target.parent / "Other.en.srt").exists()
 
 
+class TestSingleFileMode:
+    def test_single_video_file_only_probes_target_video(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = tmp_path / "library"
+        target = library / "Movie" / "Movie.mkv"
+        sibling = library / "Movie" / "Sibling.mkv"
+        nested = library / "Movie" / "sub" / "Nested.mkv"
+        _touch_video(target)
+        _touch_video(sibling)
+        _touch_video(nested)
+        probe_calls: list[Path] = []
+
+        def fake_run(args, **_kwargs):
+            if args[0] == "ffprobe":
+                probe_calls.append(Path(args[-1]))
+                stdout = _ffprobe_json(
+                    [_stream(0, 0, codec="subrip", language="eng")]
+                )
+            else:
+                output_path = Path(args[-1])
+                output_path.write_text(VALID_SRT, encoding="utf-8")
+                stdout = ""
+
+            class _Result:
+                pass
+
+            result = _Result()
+            result.stdout = stdout
+            result.stderr = ""
+            result.returncode = 0
+            return result
+
+        monkeypatch.setattr("subtranslate.coverage.subprocess.run", fake_run)
+        monkeypatch.setattr("subtranslate.extract._run_ffmpeg", fake_run)
+
+        result = extract_embedded(target)
+
+        assert result.movies_scanned == 1
+        assert result.performed == 1
+        assert probe_calls == [target.resolve()]
+        assert not (sibling.parent / "Sibling.en.srt").exists()
+        assert not (nested.parent / "Nested.en.srt").exists()
+
+    def test_single_video_file_skips_with_same_dir_external_english(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "Movie" / "Movie.mkv"
+        _touch_video(target)
+        _write_srt(target.parent / "Movie.en.srt", "existing")
+        _patch_ffprobe(
+            monkeypatch,
+            _ffprobe_json([_stream(0, 0, codec="subrip", language="eng")]),
+        )
+
+        result = extract_embedded(target)
+
+        assert result.performed == 0
+        assert result.skipped == 1
+        assert (
+            result.skipped_reasons[ExtractionSkipReason.HAS_EXTERNAL_ENGLISH]
+            == 1
+        )
+
+    def test_single_video_file_unsupported_extension_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "Movie" / "Movie.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("not a video", encoding="utf-8")
+        ffmpeg_calls: list[list[str]] = []
+
+        def capture_ffmpeg(args, **_kwargs):
+            ffmpeg_calls.append(list(args))
+
+            class _Result:
+                pass
+
+            result = _Result()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        monkeypatch.setattr("subtranslate.extract._run_ffmpeg", capture_ffmpeg)
+
+        with pytest.raises(ValueError, match="Unsupported video extension"):
+            extract_embedded(target)
+
+        assert len(ffmpeg_calls) == 0
+
+        cli_result = runner.invoke(app, ["extract-embedded", str(target)])
+        assert cli_result.exit_code == 2
+        assert "Unsupported video extension" in cli_result.output
+
+    def test_single_video_file_uppercase_extension_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "Movie" / "Movie.MKV"
+        _touch_video(target)
+        _patch_ffprobe(
+            monkeypatch,
+            _ffprobe_json([_stream(0, 0, codec="subrip", language="eng")]),
+        )
+
+        result = extract_embedded(target)
+
+        assert result.performed == 1
+        assert (target.parent / "Movie.en.srt").exists()
+
+    def test_single_video_file_nonexistent_path_errors(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "Movie" / "Movie.mkv"
+
+        result = runner.invoke(app, ["extract-embedded", str(target)])
+        assert result.exit_code == 2
+
+    def test_single_video_file_require_mount_rejects_unmounted(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "Movie" / "Movie.mkv"
+        _touch_video(target)
+
+        result = runner.invoke(
+            app, ["extract-embedded", str(target), "--require-mount"]
+        )
+        assert result.exit_code == 2
+        assert "not a mounted filesystem" in result.output
+
+    def test_single_video_file_mount_point_rejects_wrong_mount(
+        self, tmp_path: Path
+    ) -> None:
+        mount_point = tmp_path / "nas"
+        mount_point.mkdir()
+        target = mount_point / "Movie" / "Movie.mkv"
+        _touch_video(target)
+
+        result = runner.invoke(
+            app,
+            [
+                "extract-embedded",
+                str(target),
+                "--mount-point",
+                str(mount_point),
+            ],
+        )
+        assert result.exit_code == 2
+        assert "not under the required mount point" in result.output
+
+
+class TestFfmpegArgv:
+    def test_ffmpeg_argv_for_preferred_nonzero_stream_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        library = tmp_path / "library"
+        video = library / "Movie" / "Movie.mkv"
+        _touch_video(video)
+        _patch_ffprobe(
+            monkeypatch,
+            _ffprobe_json(
+                [
+                    _stream(0, 0, codec="ass", language="eng"),
+                    _stream(1, 1, codec="subrip", language="eng"),
+                ]
+            ),
+        )
+        calls: list[list[str]] = []
+
+        def capture_ffmpeg(args, **_kwargs):
+            calls.append(list(args))
+            output_path = Path(args[-1])
+            output_path.write_text(VALID_SRT, encoding="utf-8")
+
+            class _Result:
+                pass
+
+            result = _Result()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        monkeypatch.setattr("subtranslate.extract._run_ffmpeg", capture_ffmpeg)
+
+        extract_embedded(library)
+
+        assert len(calls) == 1
+        argv = calls[0]
+        assert argv[0] == "ffmpeg"
+        assert "-nostdin" in argv
+        assert "-i" in argv
+        assert str(video.resolve()) in argv
+        assert "-map" in argv
+        assert "0:s:1" in argv
+        assert "-c:s" in argv
+        assert "srt" in argv
+        output_arg = Path(argv[-1])
+        assert output_arg.suffix == ".srt"
+        assert output_arg != (video.parent / "Movie.en.srt").resolve()
+        assert output_arg.parent == video.parent
+        assert "-y" not in argv
+        assert "copy" not in argv
+        assert "remux" not in argv
+
+
+class TestFfmpegOverwriteSemantics:
+    def test_extract_honors_ffmpeg_no_clobber_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression for R1-1: ffmpeg -n must not see a pre-existing temp."""
+        library = tmp_path / "library"
+        video = library / "Movie" / "Movie.mkv"
+        _touch_video(video)
+        _patch_ffprobe(
+            monkeypatch,
+            _ffprobe_json([_stream(0, 0, codec="subrip", language="eng")]),
+        )
+
+        def fake_ffmpeg_honors_n(args, **_kwargs):
+            output_path = Path(args[-1])
+            has_n = "-n" in args
+            already_exists = output_path.exists()
+
+            class _Result:
+                pass
+
+            result = _Result()
+            if has_n and already_exists:
+                result.returncode = 1
+                result.stderr = (
+                    f"File {output_path} already exists. Exiting."
+                )
+            else:
+                output_path.write_text(VALID_SRT, encoding="utf-8")
+                result.returncode = 0
+                result.stderr = ""
+            return result
+
+        monkeypatch.setattr(
+            "subtranslate.extract._run_ffmpeg", fake_ffmpeg_honors_n
+        )
+
+        result = extract_embedded(library)
+
+        assert result.performed == 1
+        assert result.failures == 0
+        assert (video.parent / "Movie.en.srt").exists()
+
+
 class TestCli:
     def test_cli_extract_embedded_basic(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -872,10 +1161,96 @@ class TestEndToEndLibrary:
 
 
 @pytest.mark.skipif(
-    os.system("which ffmpeg > /dev/null 2>&1") != 0,
-    reason="ffmpeg not available",
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
+    reason="ffmpeg/ffprobe not available",
 )
 class TestRealFfmpeg:
-    def test_real_ffmpeg_extraction(self, tmp_path: Path) -> None:
-        """Optional real-ffmpeg validation; only runs when ffmpeg is installed."""
-        pytest.skip("real ffmpeg not available in this environment")
+    def test_real_ffmpeg_extraction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Real-ffmpeg validation: mux, extract, idempotency, safety."""
+        monkeypatch.setattr(
+            "subtranslate.coverage.subprocess.run", subprocess.run
+        )
+        monkeypatch.setattr(
+            "subtranslate.extract._run_ffmpeg", subprocess.run
+        )
+
+        movie_dir = tmp_path / "Movie"
+        movie_dir.mkdir()
+        sub_path = movie_dir / "subs.srt"
+        mkv_path = movie_dir / "Movie.mkv"
+        sub_path.write_text(VALID_SRT, encoding="utf-8")
+
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1",
+                "-f",
+                "srt",
+                "-i",
+                str(sub_path),
+                "-c:v",
+                "mpeg4",
+                "-c:s",
+                "srt",
+                "-metadata:s:s:0",
+                "language=eng",
+                str(mkv_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        original_sha = hashlib.sha256(mkv_path.read_bytes()).hexdigest()
+        original_mtime = mkv_path.stat().st_mtime
+
+        result = extract_embedded(mkv_path)
+        assert result.performed == 1
+        assert result.failures == 0
+
+        output_path = movie_dir / "Movie.en.srt"
+        assert output_path.exists()
+        assert "Hello" in output_path.read_text(encoding="utf-8")
+        assert (
+            hashlib.sha256(mkv_path.read_bytes()).hexdigest() == original_sha
+        )
+        assert mkv_path.stat().st_mtime == original_mtime
+
+        # No temp leftovers.
+        assert not any(
+            f.name.startswith(".Movie.extract-") and f.suffix == ".srt"
+            for f in movie_dir.iterdir()
+        )
+
+        second = extract_embedded(mkv_path)
+        assert second.performed == 0
+        assert second.skipped == 1
+        assert (
+            second.skipped_reasons[ExtractionSkipReason.HAS_EXTERNAL_ENGLISH]
+            == 1
+        )
+
+        output_path.write_text("do not overwrite", encoding="utf-8")
+        third = extract_embedded(mkv_path)
+        assert third.performed == 0
+        assert third.skipped == 1
+        assert output_path.read_text(encoding="utf-8") == "do not overwrite"
+
+        output_path.unlink()
+        dry = extract_embedded(mkv_path, dry_run=True)
+        assert dry.performed == 1
+        assert not output_path.exists()
+
+        output_path.unlink(missing_ok=True)
+        cli_result = runner.invoke(
+            app, ["extract-embedded", str(mkv_path)]
+        )
+        assert cli_result.exit_code == 0
+        assert output_path.exists()
+        assert "Hello" in output_path.read_text(encoding="utf-8")

@@ -166,7 +166,7 @@ The `extract-embedded` command reads supported video files with `ffprobe`, selec
 uv run subtranslate extract-embedded /mnt/nas/data/media/movies
 ```
 
-Pass a library root, a single movie directory, or a single video file. When a single video file is given, its parent directory is scanned and only that video is processed.
+Pass a library root, a single movie directory, or a single video file. When a single video file is given, only that video is probed; only external SRT files in the same directory are considered.
 
 Preview extractions without running `ffmpeg` or writing files:
 
