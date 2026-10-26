@@ -110,7 +110,7 @@ Use `--mount-point /mnt/nas/data` when you want to validate that the library is 
 
 ## Subtitle coverage discovery
 
-The `coverage` command discovers movies by their video files and reports which ones already have external subtitles. It is read-only: it does not call the API, translate, rename, or modify files, and it does not inspect embedded subtitles.
+The `coverage` command discovers movies by their video files and reports which ones already have external subtitles and embedded subtitle tracks. It is read-only: it does not call the API, translate, rename, or modify files, and it does not extract embedded subtitles.
 
 ```bash
 uv run subtranslate coverage /mnt/nas/data/media/movies
@@ -130,6 +130,24 @@ For each discovered movie, it chooses one primary category based on the availabl
 
 Specialized variants (`forced`, `sdh`, `hi`, `cc`) are preserved in the inventory but do not count as full subtitle coverage.
 
+### Embedded subtitle discovery
+
+`coverage` also inspects supported video files with `ffprobe` and lists embedded subtitle streams:
+
+- Stream index and subtitle-relative index.
+- Codec and codec kind (`text`, `image`, or `unknown`).
+- Normalized language tag (`pt-BR`, `pt`, `en`, or `null` when unknown).
+- Raw language tag as reported by `ffprobe`.
+- Track title.
+- Forced and hearing-impaired (SDH) disposition flags.
+
+Supported video extensions: `.mkv`, `.mp4`, `.avi`, `.m4v`.
+
+Text-based codecs considered convertible to SRT include: `subrip`, `srt`, `ass`, `ssa`, `webvtt`, `text`, `mov_text`.
+Image-based codecs detected as not directly translatable include: `hdmv_pgs_subtitle`, `dvd_subtitle`, `vobsub`, `pgs`, `dvb_subtitle`.
+
+`ffprobe` must be installed and available on `PATH`. Probes use a 60-second timeout, run with argument arrays, and never modify media files. A failed probe is recorded as an error and does not erase external subtitle information already discovered.
+
 Options:
 
 ```bash
@@ -140,7 +158,13 @@ uv run subtranslate coverage /mnt/nas/data/media/movies --missing-only
 uv run subtranslate coverage /mnt/nas/data/media/movies --format json
 ```
 
-JSON output contains stable field names, no Rich formatting, and a `summary` block with explicit category counts. The report always notes that it covers external SRT files only; movies marked `NO_EXTERNAL_SUBS` may still contain embedded subtitles.
+JSON output contains stable field names, no Rich formatting, and both `summary` (external SRT categories) and `embedded_summary` blocks with explicit counts. Each movie object includes:
+
+- `subtitles`: existing external SRT inventory.
+- `embedded_subtitles`: list of discovered embedded streams with `stream_index`, `subtitle_stream_index`, `video_file`, `codec`, `codec_kind`, `language_tag`, `raw_language_tag`, `title`, and boolean flags.
+- `probe_error`: `null` on success, or an error message when `ffprobe` failed, timed out, or returned malformed output.
+
+Movies marked `NO_EXTERNAL_SUBS` may still contain embedded subtitles; the embedded inventory is reported separately and does not change the external-only category.
 
 ## Batch execution
 
@@ -256,6 +280,10 @@ uv build
 - Only the OpenAI API is supported.
 - Requires an active internet connection and valid OpenAI credentials.
 - Cost estimates are approximate and based on built-in pricing for common models.
+- Embedded subtitle discovery is read-only; embedded tracks are not extracted or translated in this release.
+- Language and codec detection depend on metadata provided by `ffprobe`; missing tags are reported as `unknown`.
+- Tracks whose language tag is outside the recognized `pt-BR`/`pt`/`en` set are reported as `unknown` while preserving the raw tag.
+- Some containers store BCP-47 language tags in fields that `ffprobe` may not expose as the `language` tag, so real Brazilian Portuguese tracks may appear as generic `pt`.
 
 ## License
 
