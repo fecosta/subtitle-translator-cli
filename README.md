@@ -158,6 +158,51 @@ uv run subtranslate coverage /mnt/nas/data/media/movies --missing-only
 uv run subtranslate coverage /mnt/nas/data/media/movies --format json
 ```
 
+## Extract embedded English subtitles
+
+The `extract-embedded` command reads supported video files with `ffprobe`, selects eligible embedded English text subtitle tracks, and writes them to external `.en.srt` files using `ffmpeg`. It does not modify video files and does not call the OpenAI API.
+
+```bash
+uv run subtranslate extract-embedded /mnt/nas/data/media/movies
+```
+
+Pass a library root, a single movie directory, or a single video file. When a single video file is given, its parent directory is scanned and only that video is processed.
+
+Preview extractions without running `ffmpeg` or writing files:
+
+```bash
+uv run subtranslate extract-embedded /mnt/nas/data/media/movies --dry-run --require-mount --mount-point /mnt/nas/data
+```
+
+### Track selection
+
+A track is eligible when it is:
+
+- English (`en`, `eng`, `english`),
+- a supported text codec (`subrip`, `srt`, `ass`, `ssa`, `webvtt`, `text`, `mov_text`),
+- not forced,
+- not SDH / hearing impaired.
+
+Forced, SDH, image-based (PGS, VobSub, DVB), and unknown-language tracks are ignored. When multiple eligible tracks exist for one video, the command picks `subrip`/`srt` first, then the lowest subtitle stream index.
+
+### Skip reasons
+
+A movie or video is skipped when:
+
+- it already has a non-specialized external English subtitle (`.en.srt`, `.eng.srt`, `.english.srt`, etc.),
+- `ffprobe` reports an error,
+- subtitle-to-video association is ambiguous,
+- no eligible embedded English text track is found,
+- the target output path already exists (race protection; never overwrites).
+
+Movies with multiple video files are handled per video; each eligible video receives its own `<video stem>.en.srt`.
+
+### Exit codes
+
+- `0`: no failures.
+- `1`: one or more extractions failed (other movies are still processed).
+- `2`: mount or path validation error.
+
 JSON output contains stable field names, no Rich formatting, and both `summary` (external SRT categories) and `embedded_summary` blocks with explicit counts. Each movie object includes:
 
 - `subtitles`: existing external SRT inventory.

@@ -33,6 +33,7 @@ from .exceptions import (
     SubtitleError,
     TranslationError,
 )
+from .extract import ExtractionOutcome, ExtractionResult, ExtractionStatus, extract_embedded
 from .naming import default_output_path
 from .progress import (
     ProgressReporter,
@@ -344,6 +345,124 @@ def coverage_command(
         return
 
     _print_coverage_table(result, library_path, movies)
+
+
+@app.command("extract-embedded")
+def extract_embedded_command(
+    path: Path = typer.Argument(  # noqa: B008
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=True,
+        readable=True,
+        help="Library root, movie directory, or single video file",
+    ),
+    dry_run: bool = typer.Option(  # noqa: B008
+        False,
+        "--dry-run",
+        help="Preview extractions without running ffmpeg or writing files",
+    ),
+    require_mount: bool = typer.Option(  # noqa: B008
+        False,
+        "--require-mount",
+        help="Require the path to be under a mounted filesystem",
+    ),
+    mount_point: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--mount-point",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Require the path to be under this specific mount point",
+    ),
+) -> None:
+    """Extract eligible embedded English subtitles to external .en.srt files."""
+    try:
+        result = extract_embedded(
+            path,
+            dry_run=dry_run,
+            require_mount=require_mount,
+            mount_point=mount_point,
+        )
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    _print_extract_summary(result, path)
+
+    if result.failures:
+        raise typer.Exit(code=1)
+
+
+def _extract_outcome_label(outcome: ExtractionOutcome, base_path: Path) -> str:
+    if outcome.video_path is not None:
+        target = outcome.video_path
+    else:
+        target = outcome.movie_dir / outcome.movie_name
+    resolved_base = base_path.resolve()
+    try:
+        if resolved_base.is_file():
+            return str(target.resolve().relative_to(resolved_base.parent))
+        return str(target.resolve().relative_to(resolved_base))
+    except ValueError:
+        return str(target)
+
+
+def _format_extract_details(outcome: ExtractionOutcome) -> str:
+    if outcome.status in {ExtractionStatus.EXTRACTED, ExtractionStatus.WOULD_EXTRACT}:
+        if outcome.track is not None and outcome.output_path is not None:
+            return (
+                f"{outcome.output_path} "
+                f"(stream {outcome.track.subtitle_stream_index}, {outcome.track.codec})"
+            )
+        return str(outcome.output_path) if outcome.output_path else ""
+    return outcome.reason
+
+
+def _print_extract_summary(result: ExtractionResult, path: Path) -> None:
+    console.print("[bold]Extract Embedded Subtitles[/bold]\n")
+
+    summary = Table(show_header=False)
+    summary.add_row("Path:", str(path.resolve()))
+    summary.add_row("Mode:", "Dry run" if result.dry_run else "Extract")
+    summary.add_row("Movies scanned:", f"{result.movies_scanned}")
+    summary.add_row("Eligible tracks:", f"{result.eligible_tracks}")
+    action_label = "Would extract:" if result.dry_run else "Extracted:"
+    summary.add_row(action_label, f"{result.performed}")
+    summary.add_row("Skipped:", f"{result.skipped}")
+    summary.add_row("Failures:", f"{result.failures}")
+    console.print(summary)
+    console.print()
+
+    if result.outcomes:
+        table = Table(title="Per-video results")
+        table.add_column("Video", overflow="fold", min_width=20, max_width=60)
+        table.add_column("Status", min_width=12)
+        table.add_column("Details", overflow="fold")
+
+        for outcome in result.outcomes:
+            status_color = {
+                ExtractionStatus.EXTRACTED: "green",
+                ExtractionStatus.WOULD_EXTRACT: "yellow",
+                ExtractionStatus.SKIPPED: "yellow",
+                ExtractionStatus.FAILED: "red",
+            }.get(outcome.status, "white")
+            table.add_row(
+                markup.escape(_extract_outcome_label(outcome, path)),
+                f"[{status_color}]{outcome.status}[/{status_color}]",
+                markup.escape(_format_extract_details(outcome)),
+            )
+        console.print(table)
+        console.print()
+
+    if result.skipped_reasons:
+        skip_table = Table(title="Skip reasons")
+        skip_table.add_column("Reason")
+        skip_table.add_column("Count")
+        for reason, count in sorted(result.skipped_reasons.items()):
+            skip_table.add_row(reason, str(count))
+        console.print(skip_table)
 
 
 def _print_coverage_table(
