@@ -5,14 +5,17 @@ import fcntl
 import hashlib
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import checkpoint as _checkpoint
 from .config import Settings
 from .exceptions import ConfigurationError
-from .scanner import ScanResult, ScanStatus, scan_library
+from .scanner import ScanItem, ScanResult, ScanStatus, scan_library
 from .translator import TranslationStats, translate
+
+BatchEventCallback = Callable[[str, int, int, ScanItem, str, str], None]
 
 
 class BatchError(Exception):
@@ -133,6 +136,7 @@ def execute_batch(
     include_variants: bool = False,
     mount_point: Path | None = None,
     verbose: bool = False,
+    on_event: BatchEventCallback | None = None,
 ) -> BatchResult:
     """Execute a batch translation plan with locking, resumability, and cost controls."""
     if not settings.api_key:
@@ -178,6 +182,9 @@ def execute_batch(
             if output_path is None or item.source is None:
                 continue
 
+            if on_event is not None:
+                on_event("start", index, len(eligible), item, "", "")
+
             # Race-condition guard: a file may have appeared since planning.
             if output_path.exists():
                 result.items.append(
@@ -189,6 +196,15 @@ def execute_batch(
                     )
                 )
                 result.skipped += 1
+                if on_event is not None:
+                    on_event(
+                        "done",
+                        index,
+                        len(eligible),
+                        item,
+                        "skipped_existing",
+                        "Output file appeared after planning",
+                    )
                 continue
 
             # Budget guard before starting the next file.
@@ -196,16 +212,22 @@ def execute_batch(
                 estimated_file_cost = item.dry_run_info.estimated_cost_usd
                 if estimated_file_cost is None:
                     _mark_remaining_budget_exceeded(
-                        result, eligible, index,
-                        "Cannot verify budget: file cost unknown"
+                        result,
+                        eligible,
+                        index,
+                        "Cannot verify budget: file cost unknown",
+                        on_event=on_event,
                     )
                     cost_unknown = True
                     break
                 projected, _ = _sum_cost(actual_cost, estimated_file_cost)
                 if projected is not None and projected > max_cost_usd:
                     _mark_remaining_budget_exceeded(
-                        result, eligible, index,
-                        f"Budget would exceed ${max_cost_usd:.4f}"
+                        result,
+                        eligible,
+                        index,
+                        f"Budget would exceed ${max_cost_usd:.4f}",
+                        on_event=on_event,
                     )
                     break
 
@@ -218,15 +240,18 @@ def execute_batch(
                     verbose=verbose,
                 )
             except Exception as exc:  # noqa: BLE001
+                reason = str(exc)
                 result.items.append(
                     BatchItemResult(
                         source=item.source,
                         output_path=output_path,
                         status="failed",
-                        reason=str(exc),
+                        reason=reason,
                     )
                 )
                 result.failed += 1
+                if on_event is not None:
+                    on_event("done", index, len(eligible), item, "failed", reason)
                 continue
 
             new_cost, unknown = _sum_cost(
@@ -248,11 +273,18 @@ def execute_batch(
             result.translated += 1
             result.total_input_tokens += stats.input_tokens
             result.total_output_tokens += stats.output_tokens
+            if on_event is not None:
+                on_event(
+                    "done", index, len(eligible), item, "translated", "Translation completed"
+                )
 
             if max_cost_usd is not None and cost_unknown:
                 _mark_remaining_budget_exceeded(
-                    result, eligible, index + 1,
-                    "Cannot verify budget: runtime cost unknown"
+                    result,
+                    eligible,
+                    index + 1,
+                    "Cannot verify budget: runtime cost unknown",
+                    on_event=on_event,
                 )
                 break
 
@@ -266,8 +298,10 @@ def _mark_remaining_budget_exceeded(
     eligible: list,
     start_index: int,
     reason: str,
+    on_event: BatchEventCallback | None = None,
 ) -> None:
-    for remaining in eligible[start_index:]:
+    for offset, remaining in enumerate(eligible[start_index:]):
+        index = start_index + offset
         result.items.append(
             BatchItemResult(
                 source=remaining.source,
@@ -277,6 +311,8 @@ def _mark_remaining_budget_exceeded(
             )
         )
         result.budget_exceeded += 1
+        if on_event is not None:
+            on_event("done", index, len(eligible), remaining, "budget_exceeded", reason)
 
 
 def build_batch_plan(

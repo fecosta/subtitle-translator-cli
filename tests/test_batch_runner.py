@@ -282,3 +282,162 @@ def test_batch_lock_prevents_concurrent_runs(tmp_path: Path, batch_settings) -> 
         LibraryLock(lock_path),
     ):
         pass
+
+
+def test_batch_callback_invoked_around_translate(tmp_path: Path, batch_settings) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+
+    events = []
+
+    def callback(event_type, index, total, item, status, reason):
+        events.append((event_type, index, item.movie_name, status))
+
+    def fake_translate(input_path, output_path, settings, **kwargs):
+        assert events[-1][0] == "start"
+        return _fake_translate(input_path, output_path, settings, **kwargs)
+
+    with patch("subtranslate.batch_runner.translate", fake_translate):
+        result = execute_batch(
+            library,
+            batch_settings,
+            _plan(library, batch_settings),
+            on_event=callback,
+        )
+
+    assert result.translated == 1
+    assert events == [
+        ("start", 0, "Movie.A", ""),
+        ("done", 0, "Movie.A", "translated"),
+    ]
+
+
+def test_batch_callback_stopped_after_translate_raises(
+    tmp_path: Path, batch_settings
+) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+
+    events = []
+
+    def callback(event_type, index, total, item, status, reason):
+        events.append((event_type, index, item.movie_name, status, reason))
+
+    with patch(
+        "subtranslate.batch_runner.translate",
+        side_effect=RuntimeError("simulated API failure"),
+    ):
+        result = execute_batch(
+            library,
+            batch_settings,
+            _plan(library, batch_settings),
+            on_event=callback,
+        )
+
+    assert result.failed == 1
+    assert events == [
+        ("start", 0, "Movie.A", "", ""),
+        ("done", 0, "Movie.A", "failed", "simulated API failure"),
+    ]
+
+
+def test_batch_callback_reports_skipped_existing(
+    tmp_path: Path, batch_settings
+) -> None:
+    from subtranslate.scanner import ScanItem, ScanResult, ScanStatus
+
+    library = tmp_path / "library"
+    source = library / "Movie A" / "Movie.A.en.srt"
+    output = library / "Movie A" / "Movie.A.pt-BR.srt"
+    _write_srt(source)
+    output.write_text("exists")
+
+    fake_plan = ScanResult(
+        items=[
+            ScanItem(
+                source=source,
+                movie_dir=source.parent,
+                movie_name="Movie.A",
+                output_path=output,
+                status=ScanStatus.TRANSLATE,
+                reason="English found, Portuguese missing",
+            )
+        ],
+        eligible_count=1,
+    )
+
+    events = []
+
+    def callback(event_type, index, total, item, status, reason):
+        events.append((event_type, index, item.movie_name, status, reason))
+
+    with (
+        patch("subtranslate.batch_runner.scan_library", return_value=fake_plan),
+        patch("subtranslate.batch_runner.translate", _fake_translate),
+    ):
+        result = execute_batch(
+            library,
+            batch_settings,
+            fake_plan,
+            on_event=callback,
+        )
+
+    assert result.skipped == 1
+    assert events == [
+        ("start", 0, "Movie.A", "", ""),
+        (
+            "done",
+            0,
+            "Movie.A",
+            "skipped_existing",
+            "Output file appeared after planning",
+        ),
+    ]
+
+
+def test_batch_callback_reports_budget_exceeded(
+    tmp_path: Path, batch_settings
+) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+    _write_srt(library / "Movie B" / "Movie.B.en.srt")
+
+    events = []
+
+    def callback(event_type, index, total, item, status, reason):
+        events.append((event_type, index, item.movie_name, status))
+
+    with patch("subtranslate.batch_runner.translate", _expensive_translate):
+        result = execute_batch(
+            library,
+            batch_settings,
+            _plan(library, batch_settings),
+            max_cost_usd=0.00025,
+            on_event=callback,
+        )
+
+    assert result.translated == 1
+    assert result.budget_exceeded == 1
+    assert events == [
+        ("start", 0, "Movie.A", ""),
+        ("done", 0, "Movie.A", "translated"),
+        ("start", 1, "Movie.B", ""),
+        ("done", 1, "Movie.B", "budget_exceeded"),
+    ]
+
+
+def test_batch_without_callback_behaves_as_before(tmp_path: Path, batch_settings) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+    _write_srt(library / "Movie B" / "Movie.B.en.srt")
+
+    def conditional_translate(input_path, output_path, settings, **kwargs):
+        if "Movie.A" in input_path.name:
+            raise RuntimeError("simulated API failure")
+        return _fake_translate(input_path, output_path, settings, **kwargs)
+
+    with patch("subtranslate.batch_runner.translate", conditional_translate):
+        result = execute_batch(library, batch_settings, _plan(library, batch_settings))
+
+    assert result.translated == 1
+    assert result.failed == 1

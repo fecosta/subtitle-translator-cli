@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
+from subtranslate.batch_runner import BatchResult
 from subtranslate.cli import app
 
 runner = CliRunner()
@@ -207,3 +208,100 @@ def test_cli_batch_exits_nonzero_on_scan_errors(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "Errors:" in result.output or "planned_error" in result.output
+
+
+def test_cli_batch_immediate_feedback_with_yes(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+    _write_srt(library / "Movie B" / "Movie.B.en.srt")
+
+    with patch(
+        "subtranslate.cli.execute_batch", return_value=BatchResult(translated=2)
+    ) as mock_batch:
+        result = runner.invoke(app, ["batch", str(library), "--yes"])
+
+    assert result.exit_code == 0
+    assert "Starting translation of 2 file(s)" in result.output
+    start_pos = result.output.find("Starting translation")
+    summary_pos = result.output.find("Batch Translation Complete")
+    assert start_pos != -1
+    assert summary_pos == -1 or start_pos < summary_pos
+    mock_batch.assert_called_once()
+
+
+def test_cli_batch_immediate_feedback_after_confirmation(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+
+    with patch(
+        "subtranslate.cli.execute_batch", return_value=BatchResult(translated=1)
+    ) as mock_batch:
+        result = runner.invoke(app, ["batch", str(library)], input="y\n")
+
+    assert result.exit_code == 0
+    assert "Starting translation of 1 file(s)" in result.output
+    mock_batch.assert_called_once()
+
+
+def test_cli_batch_no_feedback_when_cancelled(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+
+    with patch("subtranslate.cli.execute_batch") as mock_batch:
+        result = runner.invoke(app, ["batch", str(library)], input="n\n")
+
+    assert result.exit_code == 0
+    assert "Starting translation" not in result.output
+    mock_batch.assert_not_called()
+
+
+def test_cli_batch_progress_counts(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+    _write_srt(library / "Movie B" / "Movie.B.en.srt")
+    _write_srt(library / "Movie C" / "Movie.C.en.srt")
+
+    with patch("subtranslate.batch_runner.translate", _fake_translate):
+        result = runner.invoke(app, ["batch", str(library), "--yes"])
+
+    assert result.exit_code == 0
+    assert "[1/3] Translating Movie.A" in result.output
+    assert "[2/3] Translating Movie.B" in result.output
+    assert "[3/3] Translating Movie.C" in result.output
+    assert "(1/3 completed, 2 remaining)" in result.output
+    assert "(2/3 completed, 1 remaining)" in result.output
+    assert "(3/3 completed, 0 remaining)" in result.output
+
+
+def test_cli_batch_reports_failure_and_exits_nonzero(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+    _write_srt(library / "Movie B" / "Movie.B.en.srt")
+
+    def conditional_translate(input_path, output_path, settings, **kwargs):
+        if "Movie.A" in input_path.name:
+            raise RuntimeError("simulated API failure")
+        return _fake_translate(input_path, output_path, settings, **kwargs)
+
+    with patch("subtranslate.batch_runner.translate", conditional_translate):
+        result = runner.invoke(app, ["batch", str(library), "--yes"])
+
+    assert result.exit_code == 1
+    assert "Failed:" in result.output
+    assert "simulated API failure" in result.output
+    assert "Translated" in result.output
+
+
+def test_cli_batch_summary_content_unchanged(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    _write_srt(library / "Movie A" / "Movie.A.en.srt")
+
+    with patch("subtranslate.batch_runner.translate", _fake_translate):
+        result = runner.invoke(app, ["batch", str(library), "--yes"])
+
+    assert result.exit_code == 0
+    assert "Batch Translation Complete" in result.output
+    assert "Translated:" in result.output
+    assert "Input tokens:" in result.output
+    assert "Estimated cost:" in result.output
+    assert "Duration:" in result.output

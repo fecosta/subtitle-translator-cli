@@ -748,6 +748,9 @@ def batch_command(
             console.print("[yellow]Batch cancelled.[/yellow]")
             raise typer.Exit()
 
+    console.print(f"Starting translation of {plan.eligible_count} file(s)...")
+    console.print()
+
     try:
         result = execute_batch(
             library_path,
@@ -758,6 +761,7 @@ def batch_command(
             include_variants=include_variants,
             mount_point=mount_point,
             verbose=verbose,
+            on_event=_batch_progress_callback(console, plan.eligible_count),
         )
     except ConfigurationError as exc:
         console.print(f"[red]Configuration error:[/red] {exc}")
@@ -769,6 +773,50 @@ def batch_command(
     _print_batch_summary(result)
     if result.failed or result.budget_exceeded or result.errors:
         raise typer.Exit(code=1)
+
+
+def _batch_status_label(status: str, reason: str) -> str:
+    if status == "translated":
+        return "[green]✓[/green] Translated"
+    if status == "failed":
+        return f"[red]✗[/red] Failed: {markup.escape(reason)}"
+    if status == "skipped_existing":
+        return f"[yellow]⚠[/yellow] Skipped: {markup.escape(reason)}"
+    if status == "budget_exceeded":
+        return f"[magenta]⊘[/magenta] Budget exceeded: {markup.escape(reason)}"
+    return f"[white]{status}[/white]"
+
+
+def _batch_progress_callback(console: Console, total: int):
+    spinner = None
+
+    def _callback(
+        event_type: str,
+        index: int,
+        total: int,
+        item,
+        status: str,
+        reason: str,
+    ) -> None:
+        nonlocal spinner
+        movie = item.movie_name
+        if event_type == "start":
+            console.print(f"[{index + 1}/{total}] Translating {movie}")
+            if console.is_terminal:
+                spinner = console.status(f"Translating {movie}...", spinner="dots")
+                spinner.start()
+        else:
+            if spinner is not None:
+                spinner.stop()
+                spinner = None
+            completed = index + 1
+            remaining = total - completed
+            label = _batch_status_label(status, reason)
+            console.print(
+                f"{label} ({completed}/{total} completed, {remaining} remaining)"
+            )
+
+    return _callback
 
 
 def _print_batch_summary(result: BatchResult) -> None:
