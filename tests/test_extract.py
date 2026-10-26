@@ -17,6 +17,11 @@ from subtranslate.extract import (
     extract_embedded,
 )
 
+# Captured before any fixture can patch subtranslate.coverage.subprocess.run,
+# which is the same object as the global subprocess.run. Real-ffmpeg tests must
+# call this reference explicitly, otherwise they would invoke a stubbed runner.
+_REAL_RUN = subprocess.run
+
 runner = CliRunner()
 
 
@@ -1160,6 +1165,13 @@ class TestEndToEndLibrary:
         assert result.skipped_reasons[ExtractionSkipReason.NO_ELIGIBLE_TRACK] == 2
 
 
+def test_real_run_reference_is_unpatched_subprocess_run() -> None:
+    """The real-ffmpeg integration test must not accidentally use a stub runner."""
+    assert _REAL_RUN is not None
+    assert _REAL_RUN.__module__ == "subprocess"
+    assert _REAL_RUN.__name__ == "run"
+
+
 @pytest.mark.skipif(
     not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
     reason="ffmpeg/ffprobe not available",
@@ -1169,12 +1181,8 @@ class TestRealFfmpeg:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Real-ffmpeg validation: mux, extract, idempotency, safety."""
-        monkeypatch.setattr(
-            "subtranslate.coverage.subprocess.run", subprocess.run
-        )
-        monkeypatch.setattr(
-            "subtranslate.extract._run_ffmpeg", subprocess.run
-        )
+        monkeypatch.setattr("subtranslate.coverage.subprocess.run", _REAL_RUN)
+        monkeypatch.setattr("subtranslate.extract._run_ffmpeg", _REAL_RUN)
 
         movie_dir = tmp_path / "Movie"
         movie_dir.mkdir()
@@ -1182,7 +1190,7 @@ class TestRealFfmpeg:
         mkv_path = movie_dir / "Movie.mkv"
         sub_path.write_text(VALID_SRT, encoding="utf-8")
 
-        subprocess.run(
+        _REAL_RUN(
             [
                 "ffmpeg",
                 "-y",
@@ -1194,18 +1202,50 @@ class TestRealFfmpeg:
                 "srt",
                 "-i",
                 str(sub_path),
+                "-map",
+                "0:v",
+                "-map",
+                "1:s",
                 "-c:v",
                 "mpeg4",
                 "-c:s",
                 "srt",
                 "-metadata:s:s:0",
                 "language=eng",
+                "-t",
+                "1",
                 str(mkv_path),
             ],
             check=True,
             capture_output=True,
             text=True,
         )
+
+        assert mkv_path.exists()
+
+        # The fixture must really contain one English SubRip stream, otherwise
+        # the extraction assertions below would pass for the wrong reason.
+        probe = _REAL_RUN(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "s",
+                "-show_entries",
+                "stream=codec_name:stream_tags=language",
+                "-of",
+                "json",
+                str(mkv_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        streams = json.loads(probe.stdout)["streams"]
+        assert len(streams) == 1
+        assert streams[0]["codec_name"] == "subrip"
+        assert streams[0]["tags"]["language"] == "eng"
 
         original_sha = hashlib.sha256(mkv_path.read_bytes()).hexdigest()
         original_mtime = mkv_path.stat().st_mtime
@@ -1222,11 +1262,11 @@ class TestRealFfmpeg:
         )
         assert mkv_path.stat().st_mtime == original_mtime
 
-        # No temp leftovers.
-        assert not any(
-            f.name.startswith(".Movie.extract-") and f.suffix == ".srt"
-            for f in movie_dir.iterdir()
-        )
+        # No temp leftovers: the private temp files are hidden and named
+        # ".Movie.en.extract-*.srt".
+        listing = [f.name for f in movie_dir.iterdir()]
+        assert not [name for name in listing if name.startswith(".")]
+        assert not [name for name in listing if ".extract-" in name]
 
         second = extract_embedded(mkv_path)
         assert second.performed == 0
