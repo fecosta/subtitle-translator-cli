@@ -1197,7 +1197,7 @@ class TestRealFfmpeg:
                 "-f",
                 "lavfi",
                 "-i",
-                "color=c=black:s=64x64:d=1",
+                "color=c=black:s=64x64:d=5",
                 "-f",
                 "srt",
                 "-i",
@@ -1212,8 +1212,6 @@ class TestRealFfmpeg:
                 "srt",
                 "-metadata:s:s:0",
                 "language=eng",
-                "-t",
-                "1",
                 str(mkv_path),
             ],
             check=True,
@@ -1230,10 +1228,11 @@ class TestRealFfmpeg:
                 "ffprobe",
                 "-v",
                 "error",
+                "-count_packets",
                 "-select_streams",
                 "s",
                 "-show_entries",
-                "stream=codec_name:stream_tags=language",
+                "stream=codec_name,nb_read_packets:stream_tags=language",
                 "-of",
                 "json",
                 str(mkv_path),
@@ -1245,6 +1244,7 @@ class TestRealFfmpeg:
         streams = json.loads(probe.stdout)["streams"]
         assert len(streams) == 1
         assert streams[0]["codec_name"] == "subrip"
+        assert int(streams[0]["nb_read_packets"]) >= 2
         assert streams[0]["tags"]["language"] == "eng"
 
         original_sha = hashlib.sha256(mkv_path.read_bytes()).hexdigest()
