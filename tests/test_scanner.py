@@ -182,7 +182,7 @@ def test_scan_refers_missing_directory(tmp_path: Path, scan_settings: Settings) 
 
 
 def test_scan_require_mount_rejects_unmounted_directory(
-    tmp_path: Path, scan_settings: Settings
+    tmp_path: Path, scan_settings: Settings, no_mounts
 ) -> None:
     library = tmp_path / "library"
     library.mkdir()

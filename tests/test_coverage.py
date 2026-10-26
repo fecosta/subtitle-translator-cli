@@ -259,7 +259,9 @@ class TestEdgeCasesAndSafety:
         with pytest.raises(ValueError):
             scan_coverage(link)
 
-    def test_coverage_require_mount_rejects_unmounted(self, tmp_path: Path) -> None:
+    def test_coverage_require_mount_rejects_unmounted(
+        self, tmp_path: Path, no_mounts
+    ) -> None:
         library = tmp_path / "library"
         library.mkdir()
 
@@ -390,7 +392,7 @@ class TestCliCoverage:
         assert "Missing" in result.output
         assert "HasPT" not in result.output
 
-    def test_cli_coverage_require_mount(self, tmp_path: Path) -> None:
+    def test_cli_coverage_require_mount(self, tmp_path: Path, no_mounts) -> None:
         library = tmp_path / "library"
         library.mkdir()
 
@@ -504,7 +506,7 @@ class TestRegressionAgainstExistingCommands:
         assert result.items[0].status == ScanStatus.TRANSLATE
 
     def test_scan_require_mount_still_rejects_unmounted(
-        self, tmp_path: Path
+        self, tmp_path: Path, no_mounts
     ) -> None:
         from subtranslate.config import get_scan_settings
         from subtranslate.scanner import scan_library

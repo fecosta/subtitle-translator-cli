@@ -517,7 +517,7 @@ class TestDryRun:
 
 class TestMountValidation:
     def test_require_mount_rejects_unmounted_library(
-        self, tmp_path: Path
+        self, tmp_path: Path, no_mounts
     ) -> None:
         library = tmp_path / "library"
         library.mkdir()
@@ -896,7 +896,7 @@ class TestSingleFileMode:
         assert result.exit_code == 2
 
     def test_single_video_file_require_mount_rejects_unmounted(
-        self, tmp_path: Path
+        self, tmp_path: Path, no_mounts
     ) -> None:
         target = tmp_path / "Movie" / "Movie.mkv"
         _touch_video(target)
@@ -1064,7 +1064,7 @@ class TestCli:
         assert not (video.parent / "Movie.en.srt").exists()
 
     def test_cli_require_mount_rejects_unmounted(
-        self, tmp_path: Path
+        self, tmp_path: Path, no_mounts
     ) -> None:
         library = tmp_path / "library"
         library.mkdir()

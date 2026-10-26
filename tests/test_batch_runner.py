@@ -129,7 +129,7 @@ def test_batch_skips_output_that_appears_after_planning(
     assert result.skipped == 1
 
 
-def test_batch_rejects_missing_mount(tmp_path: Path, batch_settings) -> None:
+def test_batch_rejects_missing_mount(tmp_path: Path, batch_settings, no_mounts) -> None:
     library = tmp_path / "library"
     library.mkdir()
     with pytest.raises(FileNotFoundError):

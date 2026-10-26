@@ -173,7 +173,7 @@ def test_cli_batch_unknown_cost_with_ceiling(tmp_path: Path) -> None:
     assert "model pricing is unknown" in result.output
 
 
-def test_cli_batch_requires_mount(tmp_path: Path) -> None:
+def test_cli_batch_requires_mount(tmp_path: Path, no_mounts) -> None:
     library = tmp_path / "library"
     library.mkdir()
 
