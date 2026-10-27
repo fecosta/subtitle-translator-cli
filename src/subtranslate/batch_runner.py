@@ -212,9 +212,7 @@ def execute_batch(
                 estimated_file_cost = item.dry_run_info.estimated_cost_usd
                 if estimated_file_cost is None:
                     _mark_remaining_budget_exceeded(
-                        result,
-                        eligible,
-                        index,
+                        result, eligible, index,
                         "Cannot verify budget: file cost unknown",
                         on_event=on_event,
                     )
@@ -223,9 +221,7 @@ def execute_batch(
                 projected, _ = _sum_cost(actual_cost, estimated_file_cost)
                 if projected is not None and projected > max_cost_usd:
                     _mark_remaining_budget_exceeded(
-                        result,
-                        eligible,
-                        index,
+                        result, eligible, index,
                         f"Budget would exceed ${max_cost_usd:.4f}",
                         on_event=on_event,
                     )
@@ -280,9 +276,7 @@ def execute_batch(
 
             if max_cost_usd is not None and cost_unknown:
                 _mark_remaining_budget_exceeded(
-                    result,
-                    eligible,
-                    index + 1,
+                    result, eligible, index + 1,
                     "Cannot verify budget: runtime cost unknown",
                     on_event=on_event,
                 )

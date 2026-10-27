@@ -748,9 +748,10 @@ def batch_command(
             console.print("[yellow]Batch cancelled.[/yellow]")
             raise typer.Exit()
 
-    console.print(f"Starting translation of {plan.eligible_count} file(s)...")
+    console.print(f"Starting translation of {plan.eligible_count} planned file(s)...")
     console.print()
 
+    callback = _batch_progress_callback(console)
     try:
         result = execute_batch(
             library_path,
@@ -761,7 +762,7 @@ def batch_command(
             include_variants=include_variants,
             mount_point=mount_point,
             verbose=verbose,
-            on_event=_batch_progress_callback(console, plan.eligible_count),
+            on_event=callback,
         )
     except ConfigurationError as exc:
         console.print(f"[red]Configuration error:[/red] {exc}")
@@ -769,6 +770,8 @@ def batch_command(
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=2) from exc
+    finally:
+        callback.close()
 
     _print_batch_summary(result)
     if result.failed or result.budget_exceeded or result.errors:
@@ -787,8 +790,11 @@ def _batch_status_label(status: str, reason: str) -> str:
     return f"[white]{status}[/white]"
 
 
-def _batch_progress_callback(console: Console, total: int):
+def _batch_progress_callback(console: Console):
     spinner = None
+    ok_count = 0
+    failed_count = 0
+    skipped_count = 0
 
     def _callback(
         event_type: str,
@@ -798,8 +804,8 @@ def _batch_progress_callback(console: Console, total: int):
         status: str,
         reason: str,
     ) -> None:
-        nonlocal spinner
-        movie = item.movie_name
+        nonlocal spinner, ok_count, failed_count, skipped_count
+        movie = markup.escape(item.movie_name)
         if event_type == "start":
             console.print(f"[{index + 1}/{total}] Translating {movie}")
             if console.is_terminal:
@@ -811,11 +817,27 @@ def _batch_progress_callback(console: Console, total: int):
                 spinner = None
             completed = index + 1
             remaining = total - completed
+            if status == "translated":
+                ok_count += 1
+            elif status == "failed":
+                failed_count += 1
+            elif status in {"skipped_existing", "budget_exceeded"}:
+                skipped_count += 1
             label = _batch_status_label(status, reason)
+            counts = f"{ok_count} ok, {failed_count} failed"
+            if skipped_count:
+                counts += f", {skipped_count} skipped"
             console.print(
-                f"{label} ({completed}/{total} completed, {remaining} remaining)"
+                f"{label} ({completed}/{total} completed: {counts}, {remaining} remaining)"
             )
 
+    def close() -> None:
+        nonlocal spinner
+        if spinner is not None:
+            spinner.stop()
+            spinner = None
+
+    _callback.close = close
     return _callback
 
 
