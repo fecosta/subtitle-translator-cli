@@ -228,12 +228,21 @@ def execute_batch(
                     break
 
             try:
+                def on_retry(attempt: int, max_retries: int) -> None:
+                    if on_event is not None:
+                        event = (
+                            "retry", index, len(eligible), item,
+                            f"{attempt}/{max_retries}", "retrying batch",
+                        )
+                        on_event(*event)
+
                 stats = translate(
                     item.source,
                     output_path,
                     settings,
                     force=False,
                     verbose=verbose,
+                    retry_callback=on_retry,
                 )
             except Exception as exc:  # noqa: BLE001
                 reason = str(exc)

@@ -21,6 +21,7 @@ import os
 import subprocess
 import tempfile
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -257,6 +258,7 @@ def extract_embedded(
     dry_run: bool = False,
     require_mount: bool = False,
     mount_point: Path | None = None,
+    on_event: Callable[[int, int, ExtractionOutcome], None] | None = None,
 ) -> ExtractionResult:
     """Extract eligible embedded English subtitles to external .en.srt files.
 
@@ -300,6 +302,21 @@ def extract_embedded(
     )
 
     target_set = {target_video} if target_video is not None else None
+    total_videos = sum(
+        1 for movie in coverage.movies
+        for video in (movie.video_paths if target_set is None else (target_video,))
+        if target_set is None or target_video in set(movie.video_paths)
+    )
+    completed_videos = 0
+
+    def record(*args, **kwargs) -> None:
+        nonlocal completed_videos
+        if args and args[0] is result:
+            args = args[1:]
+        _add_outcome(result, *args, **kwargs)
+        completed_videos += 1
+        if on_event is not None:
+            on_event(completed_videos, total_videos, result.outcomes[-1])
 
     for movie in coverage.movies:
         if target_set is not None:
@@ -313,7 +330,7 @@ def extract_embedded(
 
         if movie.probe_error:
             for video_path in videos_to_process:
-                _add_outcome(
+                record(
                     result,
                     movie,
                     video_path,
@@ -324,7 +341,7 @@ def extract_embedded(
 
         if movie.ambiguous_reasons:
             for video_path in videos_to_process:
-                _add_outcome(
+                record(
                     result,
                     movie,
                     video_path,
@@ -335,7 +352,7 @@ def extract_embedded(
 
         if _has_appropriate_external_english(movie):
             for video_path in videos_to_process:
-                _add_outcome(
+                record(
                     result,
                     movie,
                     video_path,
@@ -347,7 +364,7 @@ def extract_embedded(
         for video_path in videos_to_process:
             track = select_eligible_track(movie.embedded_subtitles, video_path.name)
             if track is None:
-                _add_outcome(
+                record(
                     result,
                     movie,
                     video_path,
@@ -360,7 +377,7 @@ def extract_embedded(
             output_path = _target_output_path(video_path)
 
             if _target_exists(output_path):
-                _add_outcome(
+                record(
                     result,
                     movie,
                     video_path,
@@ -372,7 +389,7 @@ def extract_embedded(
                 continue
 
             if dry_run:
-                _add_outcome(
+                record(
                     result,
                     movie,
                     video_path,
@@ -387,7 +404,7 @@ def extract_embedded(
             try:
                 _extract_track(video_path, track, output_path)
             except OutputExistsError:
-                _add_outcome(
+                record(
                     result,
                     movie,
                     video_path,
@@ -397,7 +414,7 @@ def extract_embedded(
                     track=track,
                 )
             except ExtractionFailedError as exc:
-                _add_outcome(
+                record(
                     result,
                     movie,
                     video_path,
@@ -407,7 +424,7 @@ def extract_embedded(
                     track=track,
                 )
             else:
-                _add_outcome(
+                record(
                     result,
                     movie,
                     video_path,

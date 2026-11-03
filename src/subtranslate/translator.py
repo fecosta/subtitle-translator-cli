@@ -85,6 +85,7 @@ def _translate_batch_with_retry(
     client: openai.OpenAI,
     settings: Settings,
     batch: Batch,
+    retry_callback: Callable[[int, int], None] | None = None,
 ) -> TranslationResult:
     """Translate a batch with bounded retries."""
     last_error: Exception | None = None
@@ -102,6 +103,8 @@ def _translate_batch_with_retry(
         ) as exc:
             last_error = exc
             if attempt < MAX_RETRIES:
+                if retry_callback is not None:
+                    retry_callback(attempt + 1, MAX_RETRIES)
                 time.sleep(2**attempt)
             continue
 
@@ -144,6 +147,7 @@ def _translate_batch_recursive(
     cp_path: Path,
     identity: dict,
     translations: dict[int, str],
+    retry_callback: Callable[[int, int], None] | None = None,
 ) -> TranslationResult:
     """Translate a batch, splitting it on validation failures.
 
@@ -151,7 +155,9 @@ def _translate_batch_recursive(
     immediately, so even split sub-batches are preserved if a sibling fails.
     """
     try:
-        result = _translate_batch_with_retry(client, settings, batch)
+        result = _translate_batch_with_retry(
+            client, settings, batch, retry_callback=retry_callback
+        )
     except BatchValidationError as exc:
         target_ids = sorted(batch.target_ids)
         if len(target_ids) <= MIN_SPLIT_SIZE:
@@ -173,6 +179,7 @@ def _translate_batch_recursive(
             cp_path,
             identity,
             translations,
+            retry_callback=retry_callback,
         )
         right_result = _translate_batch_recursive(
             client,
@@ -183,6 +190,7 @@ def _translate_batch_recursive(
             cp_path,
             identity,
             translations,
+            retry_callback=retry_callback,
         )
         combined = {**left_result.translations, **right_result.translations}
         usage = Usage(
@@ -254,6 +262,7 @@ def translate(
     force: bool = False,
     verbose: bool = False,
     progress_callback: Callable[[int, int], None] | None = None,
+    retry_callback: Callable[[int, int], None] | None = None,
 ) -> TranslationStats:
     """Translate an SRT file and write the result, using checkpoints for resume."""
     if not settings.api_key:
@@ -321,6 +330,7 @@ def translate(
                 cp_path,
                 identity,
                 translations,
+                retry_callback=retry_callback,
             )
 
             total_usage.input_tokens += batch_result.usage.input_tokens

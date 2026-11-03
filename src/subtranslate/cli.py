@@ -42,7 +42,7 @@ from .progress import (
     print_summary,
 )
 from .scanner import ScanStatus, scan_library
-from .translator import TranslationStats, get_dry_run_info, translate
+from .translator import MAX_RETRIES, TranslationStats, get_dry_run_info, translate
 
 app = typer.Typer(name="subtranslate", help="Translate SRT subtitles with OpenAI")
 debug_app = typer.Typer(name="debug", help="Debug helpers for subtitle translation")
@@ -378,12 +378,22 @@ def extract_embedded_command(
     ),
 ) -> None:
     """Extract eligible embedded English subtitles to external .en.srt files."""
+    def on_extract(completed: int, total: int, outcome: ExtractionOutcome) -> None:
+        label = _extract_outcome_label(outcome, path)
+        status = "Extracted" if outcome.status == ExtractionStatus.EXTRACTED else (
+            "Would extract"
+            if outcome.status == ExtractionStatus.WOULD_EXTRACT
+            else outcome.status.title()
+        )
+        console.print(f"[{completed}/{total}] {status}: {markup.escape(label)}")
+
     try:
         result = extract_embedded(
             path,
             dry_run=dry_run,
             require_mount=require_mount,
             mount_point=mount_point,
+            on_event=on_extract,
         )
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
@@ -806,6 +816,9 @@ def _batch_progress_callback(console: Console):
     ) -> None:
         nonlocal spinner, ok_count, failed_count, skipped_count
         movie = markup.escape(item.movie_name)
+        if event_type == "retry":
+            console.print(f"Retry {status}/{MAX_RETRIES}: {movie}")
+            return
         if event_type == "start":
             console.print(f"[{index + 1}/{total}] Translating {movie}")
             if console.is_terminal:
