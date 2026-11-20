@@ -28,11 +28,17 @@ class _BatchTranslationResponse(BaseModel):
     )
 
 
-_JSON_SCHEMA = {
-    "name": "subtitle_translation",
-    "strict": True,
-    "schema": _BatchTranslationResponse.model_json_schema(),
-}
+def _json_schema(target_count: int) -> dict[str, Any]:
+    """Return a strict JSON schema that enforces exact response cardinality."""
+    schema = _BatchTranslationResponse.model_json_schema()
+    subtitles = schema.setdefault("properties", {}).setdefault("subtitles", {})
+    subtitles["minItems"] = target_count
+    subtitles["maxItems"] = target_count
+    return {
+        "name": "subtitle_translation",
+        "strict": True,
+        "schema": schema,
+    }
 
 SYSTEM_PROMPT = (
     "You are an expert subtitle translator. "
@@ -77,9 +83,9 @@ def _supports_json_schema(model: str) -> bool:
     return name.startswith(("gpt-4o", "gpt-4.1"))
 
 
-def _response_format(model: str) -> dict[str, Any]:
+def _response_format(model: str, target_count: int) -> dict[str, Any]:
     if _supports_json_schema(model):
-        return {"type": "json_schema", "json_schema": _JSON_SCHEMA}
+        return {"type": "json_schema", "json_schema": _json_schema(target_count)}
     return {"type": "json_object"}
 
 
@@ -102,6 +108,7 @@ def translate_batch(
     batch: Batch,
 ) -> TranslationResult:
     """Translate a single batch and return id-to-text mapping plus token usage."""
+    target_entries = [entry for entry in batch.entries if entry.id in batch.target_ids]
     response = client.chat.completions.create(
         model=settings.model,
         messages=[
@@ -113,7 +120,7 @@ def translate_batch(
                 ),
             },
         ],
-        response_format=_response_format(settings.model),
+        response_format=_response_format(settings.model, len(target_entries)),
         temperature=0.3,
     )
 
@@ -129,7 +136,6 @@ def translate_batch(
     if not isinstance(subtitles, list):
         raise ValueError("OpenAI response 'subtitles' must be a list.")
 
-    target_entries = [entry for entry in batch.entries if entry.id in batch.target_ids]
     if len(subtitles) != len(target_entries):
         raise ValueError(
             f"Batch size mismatch: expected {len(target_entries)} translations, "

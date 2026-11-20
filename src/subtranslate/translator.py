@@ -81,13 +81,43 @@ def _validate_batch(result: TranslationResult, batch: Batch) -> None:
             raise ValueError(f"Empty translation returned for id {entry_id}.")
 
 
+def _is_schema_output_violation(exc: openai.BadRequestError) -> bool:
+    """Return True when the model output violated the structured response schema.
+
+    Request-level schema errors (invalid schema, unsupported model) are treated
+    as non-recoverable and return False so they fail fast.
+    """
+    code = getattr(exc, "code", None)
+    if code == "json_schema":
+        return True
+    if code in ("invalid_json_schema", "json_schema_unsupported"):
+        return False
+
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error", {})
+        body_code = error.get("code") if isinstance(error, dict) else None
+        if body_code == "json_schema":
+            return True
+        if body_code in ("invalid_json_schema", "json_schema_unsupported"):
+            return False
+
+    message = str(exc).lower()
+    return "failed to generate" in message or "does not match" in message
+
+
 def _translate_batch_with_retry(
     client: openai.OpenAI,
     settings: Settings,
     batch: Batch,
     retry_callback: Callable[[int, int], None] | None = None,
 ) -> TranslationResult:
-    """Translate a batch with bounded retries."""
+    """Translate a batch with bounded retries.
+
+    Only transient API errors are retried. Structural validation failures and
+    non-transient request errors are surfaced immediately so the caller can
+    decide whether recovery (e.g. stripping context) is appropriate.
+    """
     last_error: Exception | None = None
     for attempt in range(MAX_RETRIES + 1):
         try:
@@ -99,7 +129,6 @@ def _translate_batch_with_retry(
             openai.APITimeoutError,
             openai.RateLimitError,
             openai.InternalServerError,
-            ValueError,
         ) as exc:
             last_error = exc
             if attempt < MAX_RETRIES:
@@ -107,11 +136,18 @@ def _translate_batch_with_retry(
                     retry_callback(attempt + 1, MAX_RETRIES)
                 time.sleep(2**attempt)
             continue
+        except openai.BadRequestError as exc:
+            if _is_schema_output_violation(exc):
+                raise BatchValidationError(
+                    f"OpenAI rejected the structured response: {exc}"
+                ) from exc
+            raise TranslationError(f"OpenAI request rejected: {exc}") from exc
+        except ValueError as exc:
+            raise BatchValidationError(str(exc)) from exc
 
-    message = f"Batch failed after {MAX_RETRIES + 1} attempts: {last_error}"
-    if isinstance(last_error, ValueError):
-        raise BatchValidationError(message) from last_error
-    raise TranslationError(message) from last_error
+    raise TranslationError(
+        f"Batch failed after {MAX_RETRIES + 1} attempts: {last_error}"
+    ) from last_error
 
 
 def _detailed_batch_error(
@@ -120,6 +156,7 @@ def _detailed_batch_error(
     total_batches: int,
     checkpoint_path: Path,
     cause: Exception,
+    fallback_cause: Exception | None = None,
 ) -> TranslationError:
     """Build a diagnostic error message for a failed batch."""
     target_ids = sorted(batch.target_ids)
@@ -127,15 +164,45 @@ def _detailed_batch_error(
         target_range = f"{target_ids[0]}-{target_ids[-1]}"
     else:
         target_range = str(target_ids[0])
+    cause_lines = f"Cause: {cause}"
+    if fallback_cause is not None:
+        cause_lines += f"\nIsolated fallback also failed: {fallback_cause}"
     return TranslationError(
         f"Batch {batch_index + 1}/{total_batches} failed after {MAX_RETRIES + 1} attempts.\n"
         f"Expected target ids: {target_ids}\n"
         f"Range: {target_range}\n"
-        f"Cause: {cause}\n"
+        f"{cause_lines}\n"
         f"Completed batches were checkpointed.\n"
         f"Checkpoint: {checkpoint_path}\n"
         "Rerun the same command to resume the translation."
     )
+
+
+def _can_attempt_singleton_recovery(batch: Batch) -> bool:
+    """Return True when the batch has one target surrounded by context."""
+    if len(batch.target_ids) != 1:
+        return False
+    return len(batch.entries) > 1
+
+
+def _strip_context(batch: Batch) -> Batch:
+    """Return a batch containing only the single target entry."""
+    target_id = next(iter(batch.target_ids))
+    target_entry = next(entry for entry in batch.entries if entry.id == target_id)
+    return Batch(entries=[target_entry], target_ids={target_id})
+
+
+def _commit_batch_result(
+    result: TranslationResult,
+    cp_path: Path,
+    identity: dict,
+    translations: dict[int, str],
+) -> TranslationResult:
+    """Merge a successful result into the checkpoint and save it."""
+    for entry_id, text in result.translations.items():
+        translations[entry_id] = text
+    save_checkpoint(cp_path, identity, translations)
+    return result
 
 
 def _translate_batch_recursive(
@@ -149,7 +216,7 @@ def _translate_batch_recursive(
     translations: dict[int, str],
     retry_callback: Callable[[int, int], None] | None = None,
 ) -> TranslationResult:
-    """Translate a batch, splitting it on validation failures.
+    """Translate a batch, recovering singletons by stripping context and splitting otherwise.
 
     Successful translations are merged into ``translations`` and checkpointed
     immediately, so even split sub-batches are preserved if a sibling fails.
@@ -159,54 +226,67 @@ def _translate_batch_recursive(
             client, settings, batch, retry_callback=retry_callback
         )
     except BatchValidationError as exc:
-        target_ids = sorted(batch.target_ids)
-        if len(target_ids) <= MIN_SPLIT_SIZE:
-            raise _detailed_batch_error(
-                batch, batch_index, total_batches, cp_path, exc
-            ) from exc
+        if _can_attempt_singleton_recovery(batch):
+            stripped = _strip_context(batch)
+            try:
+                result = _translate_batch_with_retry(
+                    client, settings, stripped, retry_callback=retry_callback
+                )
+            except BatchValidationError as fallback_exc:
+                raise _detailed_batch_error(
+                    batch,
+                    batch_index,
+                    total_batches,
+                    cp_path,
+                    exc,
+                    fallback_cause=fallback_exc,
+                ) from fallback_exc
+        else:
+            target_ids = sorted(batch.target_ids)
+            if len(target_ids) <= MIN_SPLIT_SIZE:
+                raise _detailed_batch_error(
+                    batch, batch_index, total_batches, cp_path, exc
+                ) from exc
 
-        # Split target entries in half and translate each half with the same context.
-        mid = len(target_ids) // 2
-        left_batch = Batch(entries=batch.entries, target_ids=set(target_ids[:mid]))
-        right_batch = Batch(entries=batch.entries, target_ids=set(target_ids[mid:]))
+            # Split target entries in half and translate each half with the same context.
+            mid = len(target_ids) // 2
+            left_batch = Batch(entries=batch.entries, target_ids=set(target_ids[:mid]))
+            right_batch = Batch(entries=batch.entries, target_ids=set(target_ids[mid:]))
 
-        left_result = _translate_batch_recursive(
-            client,
-            settings,
-            left_batch,
-            batch_index,
-            total_batches,
-            cp_path,
-            identity,
-            translations,
-            retry_callback=retry_callback,
-        )
-        right_result = _translate_batch_recursive(
-            client,
-            settings,
-            right_batch,
-            batch_index,
-            total_batches,
-            cp_path,
-            identity,
-            translations,
-            retry_callback=retry_callback,
-        )
-        combined = {**left_result.translations, **right_result.translations}
-        usage = Usage(
-            input_tokens=left_result.usage.input_tokens + right_result.usage.input_tokens,
-            output_tokens=left_result.usage.output_tokens + right_result.usage.output_tokens,
-        )
-        return TranslationResult(translations=combined, usage=usage)
+            left_result = _translate_batch_recursive(
+                client,
+                settings,
+                left_batch,
+                batch_index,
+                total_batches,
+                cp_path,
+                identity,
+                translations,
+                retry_callback=retry_callback,
+            )
+            right_result = _translate_batch_recursive(
+                client,
+                settings,
+                right_batch,
+                batch_index,
+                total_batches,
+                cp_path,
+                identity,
+                translations,
+                retry_callback=retry_callback,
+            )
+            combined = {**left_result.translations, **right_result.translations}
+            usage = Usage(
+                input_tokens=left_result.usage.input_tokens + right_result.usage.input_tokens,
+                output_tokens=left_result.usage.output_tokens + right_result.usage.output_tokens,
+            )
+            result = TranslationResult(translations=combined, usage=usage)
     except TranslationError as exc:
         raise _detailed_batch_error(
             batch, batch_index, total_batches, cp_path, exc
         ) from exc
 
-    for entry_id, text in result.translations.items():
-        translations[entry_id] = text
-    save_checkpoint(cp_path, identity, translations)
-    return result
+    return _commit_batch_result(result, cp_path, identity, translations)
 
 
 def _build_translated_entries(

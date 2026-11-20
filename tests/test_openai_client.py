@@ -9,7 +9,12 @@ import pytest
 
 from subtranslate.config import Settings
 from subtranslate.models import Batch, SubtitleEntry
-from subtranslate.openai_client import SYSTEM_PROMPT, _response_format, translate_batch
+from subtranslate.openai_client import (
+    SYSTEM_PROMPT,
+    _json_schema,
+    _response_format,
+    translate_batch,
+)
 
 
 @dataclass
@@ -162,15 +167,30 @@ def test_translate_batch_rejects_non_list_subtitles() -> None:
 
 
 def test_structured_output_for_supported_models() -> None:
-    fmt = _response_format("gpt-4.1-mini")
+    fmt = _response_format("gpt-4.1-mini", target_count=2)
     assert fmt["type"] == "json_schema"
     assert fmt["json_schema"]["strict"] is True
     assert "schema" in fmt["json_schema"]
+    assert fmt["json_schema"]["schema"]["properties"]["subtitles"]["maxItems"] == 2
 
 
 def test_json_object_fallback_for_unsupported_models() -> None:
-    fmt = _response_format("gpt-3.5-turbo")
+    fmt = _response_format("gpt-3.5-turbo", target_count=2)
     assert fmt["type"] == "json_object"
+
+
+def test_response_schema_enforces_exact_cardinality() -> None:
+    schema = _json_schema(1)
+    subtitles = schema["schema"]["properties"]["subtitles"]
+    assert subtitles["minItems"] == 1
+    assert subtitles["maxItems"] == 1
+
+
+def test_response_schema_cardinality_matches_target_count() -> None:
+    schema = _json_schema(3)
+    subtitles = schema["schema"]["properties"]["subtitles"]
+    assert subtitles["minItems"] == 3
+    assert subtitles["maxItems"] == 3
 
 
 def test_positional_mapping_with_high_subtitle_ids() -> None:
