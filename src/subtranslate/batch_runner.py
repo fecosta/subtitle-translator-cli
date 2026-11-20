@@ -17,7 +17,6 @@ from .translator import TranslationStats, translate
 
 BatchEventCallback = Callable[[str, int, int, ScanItem, str, str], None]
 
-
 class BatchError(Exception):
     """Raised when batch execution cannot proceed safely."""
 
@@ -36,7 +35,6 @@ class BatchItemResult:
 @dataclass(slots=True)
 class BatchResult:
     """Aggregate outcome of a batch translation run."""
-
     items: list[BatchItemResult] = field(default_factory=list)
     translated: int = 0
     skipped: int = 0
@@ -228,11 +226,21 @@ def execute_batch(
                     break
 
             try:
-                def on_retry(attempt: int, max_retries: int) -> None:
+                def on_retry(
+                    attempt: int,
+                    max_retries: int,
+                    *,
+                    _index: int = index,
+                    _item: ScanItem = item,
+                ) -> None:
                     if on_event is not None:
                         event = (
-                            "retry", index, len(eligible), item,
-                            f"{attempt}/{max_retries}", "retrying batch",
+                            "retry",
+                            _index,
+                            len(eligible),
+                            _item,
+                            f"{attempt}/{max_retries}",
+                            "retrying batch",
                         )
                         on_event(*event)
 
