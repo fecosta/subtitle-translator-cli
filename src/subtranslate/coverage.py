@@ -409,6 +409,90 @@ def _is_srt_file(path: Path) -> bool:
     return path.suffix.lower() == ".srt" and not path.is_symlink()
 
 
+def scan_single_video(
+    video_path: Path,
+    *,
+    require_mount: bool = False,
+    mount_point: Path | None = None,
+) -> CoverageResult:
+    """Inspect a single video file and its same-directory external subtitles.
+
+    Only the given video is probed, and only SRT files in the same directory
+    are considered for subtitle association. Sibling videos and
+    subdirectories are never touched.
+    """
+    if video_path.is_symlink():
+        raise ValueError(f"Video path must not be a symlink: {video_path}")
+
+    video_path = video_path.resolve()
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video path does not exist: {video_path}")
+    if not video_path.is_file():
+        raise NotADirectoryError(f"Video path is not a file: {video_path}")
+    if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported video extension: {video_path.suffix} "
+            f"(supported: {', '.join(sorted(VIDEO_EXTENSIONS))})"
+        )
+
+    movie_dir = video_path.parent
+    if mount_point is not None and not is_under_specific_mount(movie_dir, mount_point):
+        raise FileNotFoundError(
+            f"Library path is not under the required mount point: {mount_point}"
+        )
+    if require_mount and not is_under_mount(movie_dir):
+        raise FileNotFoundError(
+            f"Library path is not a mounted filesystem: {movie_dir}"
+        )
+
+    video_stem = video_path.stem.lower()
+    videos: dict[str, list[Path]] = {video_stem: [video_path]}
+    display_names: dict[str, str] = {video_stem: video_path.stem}
+    srts: list[tuple[Path, SubtitleName, frozenset[str]]] = []
+
+    try:
+        for entry in os.scandir(movie_dir):
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            file_path = Path(entry.path)
+            if _is_srt_file(file_path):
+                try:
+                    parsed = parse_subtitle_name(file_path)
+                except Exception:  # noqa: BLE001
+                    continue
+                srts.append((file_path, parsed, _candidate_movie_names(parsed)))
+    except OSError:
+        pass
+
+    video_stems = set(videos)
+    associated, ambiguous = _associate_subtitles(video_stems, srts)
+
+    subtitles = tuple(associated.get(video_stem, ()))
+    ambiguous_reasons = tuple(ambiguous.get(video_stem, ()))
+    embedded, probe_error = probe_video_subtitles(video_path)
+
+    errors: list[tuple[Path, str]] = []
+    if probe_error:
+        errors.append((video_path, probe_error))
+
+    movie = MovieCoverage(
+        movie_dir=movie_dir,
+        movie_name=display_names[video_stem],
+        video_paths=tuple(sorted(videos[video_stem])),
+        category=_classify(subtitles, ambiguous_reasons),
+        subtitles=subtitles,
+        embedded_subtitles=tuple(embedded),
+        ambiguous_reasons=ambiguous_reasons,
+        probe_error=probe_error,
+    )
+
+    return CoverageResult(
+        movies=(movie,),
+        directories_scanned=1,
+        errors=tuple(errors),
+    )
+
+
 def scan_coverage(
     library_path: Path,
     *,

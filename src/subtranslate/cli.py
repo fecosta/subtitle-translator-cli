@@ -33,6 +33,7 @@ from .exceptions import (
     SubtitleError,
     TranslationError,
 )
+from .extract import ExtractionOutcome, ExtractionResult, ExtractionStatus, extract_embedded
 from .naming import default_output_path
 from .progress import (
     ProgressReporter,
@@ -41,7 +42,7 @@ from .progress import (
     print_summary,
 )
 from .scanner import ScanStatus, scan_library
-from .translator import TranslationStats, get_dry_run_info, translate
+from .translator import MAX_RETRIES, TranslationStats, get_dry_run_info, translate
 
 app = typer.Typer(name="subtranslate", help="Translate SRT subtitles with OpenAI")
 debug_app = typer.Typer(name="debug", help="Debug helpers for subtitle translation")
@@ -346,6 +347,134 @@ def coverage_command(
     _print_coverage_table(result, library_path, movies)
 
 
+@app.command("extract-embedded")
+def extract_embedded_command(
+    path: Path = typer.Argument(  # noqa: B008
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=True,
+        readable=True,
+        help="Library root, movie directory, or single video file",
+    ),
+    dry_run: bool = typer.Option(  # noqa: B008
+        False,
+        "--dry-run",
+        help="Preview extractions without running ffmpeg or writing files",
+    ),
+    require_mount: bool = typer.Option(  # noqa: B008
+        False,
+        "--require-mount",
+        help="Require the path to be under a mounted filesystem",
+    ),
+    mount_point: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--mount-point",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Require the path to be under this specific mount point",
+    ),
+) -> None:
+    """Extract eligible embedded English subtitles to external .en.srt files."""
+    def on_extract(completed: int, total: int, outcome: ExtractionOutcome) -> None:
+        label = _extract_outcome_label(outcome, path)
+        status = "Extracted" if outcome.status == ExtractionStatus.EXTRACTED else (
+            "Would extract"
+            if outcome.status == ExtractionStatus.WOULD_EXTRACT
+            else outcome.status.title()
+        )
+        console.print(f"[{completed}/{total}] {status}: {markup.escape(label)}")
+
+    try:
+        result = extract_embedded(
+            path,
+            dry_run=dry_run,
+            require_mount=require_mount,
+            mount_point=mount_point,
+            on_event=on_extract,
+        )
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    _print_extract_summary(result, path)
+
+    if result.failures:
+        raise typer.Exit(code=1)
+
+
+def _extract_outcome_label(outcome: ExtractionOutcome, base_path: Path) -> str:
+    if outcome.video_path is not None:
+        target = outcome.video_path
+    else:
+        target = outcome.movie_dir / outcome.movie_name
+    resolved_base = base_path.resolve()
+    try:
+        if resolved_base.is_file():
+            return str(target.resolve().relative_to(resolved_base.parent))
+        return str(target.resolve().relative_to(resolved_base))
+    except ValueError:
+        return str(target)
+
+
+def _format_extract_details(outcome: ExtractionOutcome) -> str:
+    if outcome.status in {ExtractionStatus.EXTRACTED, ExtractionStatus.WOULD_EXTRACT}:
+        if outcome.track is not None and outcome.output_path is not None:
+            return (
+                f"{outcome.output_path} "
+                f"(stream {outcome.track.subtitle_stream_index}, {outcome.track.codec})"
+            )
+        return str(outcome.output_path) if outcome.output_path else ""
+    return outcome.reason
+
+
+def _print_extract_summary(result: ExtractionResult, path: Path) -> None:
+    console.print("[bold]Extract Embedded Subtitles[/bold]\n")
+
+    summary = Table(show_header=False)
+    summary.add_row("Path:", str(path.resolve()))
+    summary.add_row("Mode:", "Dry run" if result.dry_run else "Extract")
+    summary.add_row("Movies scanned:", f"{result.movies_scanned}")
+    summary.add_row("Eligible tracks:", f"{result.eligible_tracks}")
+    action_label = "Would extract:" if result.dry_run else "Extracted:"
+    summary.add_row(action_label, f"{result.performed}")
+    summary.add_row("Skipped:", f"{result.skipped}")
+    summary.add_row("Failures:", f"{result.failures}")
+    console.print(summary)
+    console.print()
+
+    if result.outcomes:
+        table = Table(title="Per-video results")
+        table.add_column("Video", overflow="fold", min_width=20, max_width=60)
+        table.add_column("Status", min_width=12)
+        table.add_column("Details", overflow="fold")
+
+        for outcome in result.outcomes:
+            status_color = {
+                ExtractionStatus.EXTRACTED: "green",
+                ExtractionStatus.WOULD_EXTRACT: "yellow",
+                ExtractionStatus.SKIPPED: "yellow",
+                ExtractionStatus.FAILED: "red",
+            }.get(outcome.status, "white")
+            table.add_row(
+                markup.escape(_extract_outcome_label(outcome, path)),
+                f"[{status_color}]{outcome.status}[/{status_color}]",
+                markup.escape(_format_extract_details(outcome)),
+            )
+        console.print(table)
+        console.print()
+
+    if result.skipped_reasons:
+        skip_table = Table(title="Skip reasons")
+        skip_table.add_column("Reason")
+        skip_table.add_column("Count")
+        for reason, count in sorted(result.skipped_reasons.items()):
+            skip_table.add_row(reason, str(count))
+        console.print(skip_table)
+
+
 def _print_coverage_table(
     result: CoverageResult,
     library_path: Path,
@@ -629,6 +758,10 @@ def batch_command(
             console.print("[yellow]Batch cancelled.[/yellow]")
             raise typer.Exit()
 
+    console.print(f"Starting translation of {plan.eligible_count} planned file(s)...")
+    console.print()
+
+    callback = _batch_progress_callback(console)
     try:
         result = execute_batch(
             library_path,
@@ -639,6 +772,7 @@ def batch_command(
             include_variants=include_variants,
             mount_point=mount_point,
             verbose=verbose,
+            on_event=callback,
         )
     except ConfigurationError as exc:
         console.print(f"[red]Configuration error:[/red] {exc}")
@@ -646,10 +780,78 @@ def batch_command(
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=2) from exc
+    finally:
+        callback.close()
 
     _print_batch_summary(result)
     if result.failed or result.budget_exceeded or result.errors:
         raise typer.Exit(code=1)
+
+
+def _batch_status_label(status: str, reason: str) -> str:
+    if status == "translated":
+        return "[green]✓[/green] Translated"
+    if status == "failed":
+        return f"[red]✗[/red] Failed: {markup.escape(reason)}"
+    if status == "skipped_existing":
+        return f"[yellow]⚠[/yellow] Skipped: {markup.escape(reason)}"
+    if status == "budget_exceeded":
+        return f"[magenta]⊘[/magenta] Budget exceeded: {markup.escape(reason)}"
+    return f"[white]{status}[/white]"
+
+
+def _batch_progress_callback(console: Console):
+    spinner = None
+    ok_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    def _callback(
+        event_type: str,
+        index: int,
+        total: int,
+        item,
+        status: str,
+        reason: str,
+    ) -> None:
+        nonlocal spinner, ok_count, failed_count, skipped_count
+        movie = markup.escape(item.movie_name)
+        if event_type == "retry":
+            console.print(f"Retry {status}/{MAX_RETRIES}: {movie}")
+            return
+        if event_type == "start":
+            console.print(f"[{index + 1}/{total}] Translating {movie}")
+            if console.is_terminal:
+                spinner = console.status(f"Translating {movie}...", spinner="dots")
+                spinner.start()
+        else:
+            if spinner is not None:
+                spinner.stop()
+                spinner = None
+            completed = index + 1
+            remaining = total - completed
+            if status == "translated":
+                ok_count += 1
+            elif status == "failed":
+                failed_count += 1
+            elif status in {"skipped_existing", "budget_exceeded"}:
+                skipped_count += 1
+            label = _batch_status_label(status, reason)
+            counts = f"{ok_count} ok, {failed_count} failed"
+            if skipped_count:
+                counts += f", {skipped_count} skipped"
+            console.print(
+                f"{label} ({completed}/{total} completed: {counts}, {remaining} remaining)"
+            )
+
+    def close() -> None:
+        nonlocal spinner
+        if spinner is not None:
+            spinner.stop()
+            spinner = None
+
+    _callback.close = close
+    return _callback
 
 
 def _print_batch_summary(result: BatchResult) -> None:

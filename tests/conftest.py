@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,12 @@ def settings() -> Settings:
 @pytest.fixture
 def checkpoint_dir(tmp_path: Path) -> Path:
     return tmp_path / "checkpoints"
+
+
+@pytest.fixture
+def no_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Simulate a host with no mount points anywhere in the tested paths."""
+    monkeypatch.setattr(os.path, "ismount", lambda _path: False)
 
 
 @pytest.fixture(autouse=True)
