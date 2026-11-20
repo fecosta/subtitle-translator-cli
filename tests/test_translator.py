@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import openai
 import pytest
 
 from subtranslate.checkpoint import (
@@ -28,6 +29,17 @@ def _fake_result(client, settings, batch) -> TranslationResult:
     return TranslationResult(
         translations=translations,
         usage=Usage(input_tokens=10, output_tokens=5),
+    )
+
+
+def _bad_request_error(code: str, message: str) -> openai.BadRequestError:
+    """Build a mocked OpenAI BadRequestError with structured error details."""
+    response = MagicMock()
+    response.status_code = 400
+    return openai.BadRequestError(
+        message,
+        response=response,
+        body={"error": {"code": code, "message": message}},
     )
 
 
@@ -123,7 +135,9 @@ def test_translate_retries_then_succeeds(sample_srt: Path, settings, tmp_path: P
     def fake_translate_batch(client, settings, batch):
         calls.append(1)
         if len(calls) == 1:
-            raise ValueError("malformed response")
+            raise openai.APIConnectionError(
+                message="transient failure", request=MagicMock()
+            )
         return _fake_result(client, settings, batch)
 
     with patch("subtranslate.translator.translate_batch", fake_translate_batch), patch(
@@ -180,25 +194,29 @@ def test_context_entries_not_required_in_response(
         assert entry.text.startswith("[PT]")
 
 
-def test_context_entries_returned_as_translations_are_rejected(
+def test_context_entries_returned_as_translations_are_rejected_and_recovered(
     sample_srt: Path, settings, tmp_path: Path
 ) -> None:
-    """Regression: returning context ids as translations is treated as unexpected."""
+    """Regression: returning context ids as translations triggers singleton recovery."""
     output = tmp_path / "out.srt"
 
     def fake_translate_batch(client, settings, batch):
-        translations = {
-            entry.id: f"[PT] {entry.text}" for entry in batch.entries
-        }
-        return TranslationResult(translations=translations)
+        if len(batch.entries) > 1:
+            # Model incorrectly includes context ids in the response.
+            return TranslationResult(
+                translations={
+                    entry.id: f"[PT] {entry.text}" for entry in batch.entries
+                }
+            )
+        return _fake_result(client, settings, batch)
 
-    with (
-        patch("subtranslate.translator.translate_batch", fake_translate_batch),
-        pytest.raises(TranslationError),
-    ):
+    with patch("subtranslate.translator.translate_batch", fake_translate_batch):
         translate(sample_srt, output, settings)
 
-    assert not output.exists()
+    translated = load_subtitles(output)
+    assert len(translated) == 5
+    for entry in translated:
+        assert entry.text.startswith("[PT]")
 
 
 def test_empty_target_translation_is_rejected(
@@ -452,3 +470,208 @@ def test_resume_after_partial_split_does_not_retransmit_completed_ids(
     assert [4] in calls_after_resume
     assert [3] not in calls_after_resume
     assert [3, 4] not in calls_after_resume
+
+
+def _checkpoint_with_only_id_three_missing(
+    sample_srt: Path, settings, tmp_path: Path
+) -> Path:
+    """Create a checkpoint that leaves entry id 3 as the only missing target."""
+    cp_path = checkpoint_path(sample_srt, settings)
+    identity = build_identity(sample_srt, settings, compute_source_hash(sample_srt))
+    save_checkpoint(
+        cp_path,
+        identity,
+        {1: "[PT] one", 2: "[PT] two", 4: "[PT] four", 5: "[PT] five"},
+    )
+    return cp_path
+
+
+def test_singleton_multiple_translations_uses_stripped_fallback(
+    sample_srt: Path, settings, tmp_path: Path, checkpoint_dir: Path
+) -> None:
+    """A singleton target returning two translations is recovered by stripping context."""
+    output = tmp_path / "out.srt"
+    _checkpoint_with_only_id_three_missing(sample_srt, settings, tmp_path)
+    calls = []
+
+    def fake_translate_batch(client, settings, batch):
+        calls.append(sorted(batch.all_ids))
+        if len(batch.entries) > 1:
+            # Model treats the target plus its trailing context as two subtitles.
+            return TranslationResult(translations={3: "[PT] tres", 4: "[PT] cuatro"})
+        return TranslationResult(translations={3: "[PT] tres"})
+
+    with patch("subtranslate.translator.translate_batch", fake_translate_batch):
+        translate(sample_srt, output, settings)
+
+    translated = load_subtitles(output)
+    assert translated[2].text == "[PT] tres"
+    assert [1, 2, 3, 4, 5] in calls
+    assert [3] in calls
+
+
+def test_singleton_context_returned_as_translation_is_rejected_and_recovered(
+    sample_srt: Path, settings, tmp_path: Path, checkpoint_dir: Path
+) -> None:
+    """A singleton target that includes a context id in the response is recovered."""
+    output = tmp_path / "out.srt"
+    _checkpoint_with_only_id_three_missing(sample_srt, settings, tmp_path)
+    calls = []
+
+    def fake_translate_batch(client, settings, batch):
+        calls.append(sorted(batch.all_ids))
+        if len(batch.entries) > 1:
+            # Model returns the preceding context id as if it were a target.
+            return TranslationResult(translations={2: "[PT] dos", 3: "[PT] tres"})
+        return TranslationResult(translations={3: "[PT] tres"})
+
+    with patch("subtranslate.translator.translate_batch", fake_translate_batch):
+        translate(sample_srt, output, settings)
+
+    translated = load_subtitles(output)
+    assert translated[2].text == "[PT] tres"
+    # Previously completed translations are preserved.
+    assert translated[1].text == "[PT] two"
+    assert [3] in calls
+
+
+def test_singleton_fallback_failure_is_bounded(
+    sample_srt: Path, settings, tmp_path: Path, checkpoint_dir: Path
+) -> None:
+    """After stripping context, a still-invalid singleton fails fast without endless retries."""
+    output = tmp_path / "out.srt"
+    _checkpoint_with_only_id_three_missing(sample_srt, settings, tmp_path)
+    calls = []
+
+    def fake_translate_batch(client, settings, batch):
+        calls.append(sorted(batch.all_ids))
+        # Always return two translations regardless of context.
+        return TranslationResult(translations={3: "[PT] tres", 4: "[PT] cuatro"})
+
+    with (
+        patch("subtranslate.translator.translate_batch", fake_translate_batch),
+        pytest.raises(TranslationError),
+    ):
+        translate(sample_srt, output, settings)
+
+    assert not output.exists()
+    # One full-context attempt and one stripped singleton attempt.
+    assert calls == [[1, 2, 3, 4, 5], [3]]
+
+
+def test_checkpoint_recovery_with_single_missing_entry_preserves_completed_work(
+    sample_srt: Path, settings, tmp_path: Path, checkpoint_dir: Path
+) -> None:
+    """Resuming with one missing entry keeps every previously translated entry intact."""
+    output = tmp_path / "out.srt"
+    cp_path = _checkpoint_with_only_id_three_missing(sample_srt, settings, tmp_path)
+
+    with patch("subtranslate.translator.translate_batch", _fake_result):
+        translate(sample_srt, output, settings)
+
+    translated = load_subtitles(output)
+    assert len(translated) == 5
+    assert translated[0].text == "[PT] one"
+    assert translated[1].text == "[PT] two"
+    assert translated[2].text.startswith("[PT]")
+    assert translated[3].text == "[PT] four"
+    assert translated[4].text == "[PT] five"
+    assert not cp_path.exists()
+
+
+def test_unrecoverable_singleton_failure_does_not_modify_output(
+    sample_srt: Path, settings, tmp_path: Path, checkpoint_dir: Path
+) -> None:
+    """If singleton recovery fails, no partial output file is written."""
+    output = tmp_path / "out.srt"
+    _checkpoint_with_only_id_three_missing(sample_srt, settings, tmp_path)
+
+    def fake_translate_batch(client, settings, batch):
+        return TranslationResult(translations={3: "[PT] tres", 4: "[PT] cuatro"})
+
+    with (
+        patch("subtranslate.translator.translate_batch", fake_translate_batch),
+        pytest.raises(TranslationError),
+    ):
+        translate(sample_srt, output, settings)
+
+    assert not output.exists()
+
+
+def test_singleton_fallback_failure_preserves_isolated_error(
+    sample_srt: Path, settings, tmp_path: Path, checkpoint_dir: Path
+) -> None:
+    """Diagnostic reports both the contextual failure and the isolated fallback failure."""
+    output = tmp_path / "out.srt"
+    _checkpoint_with_only_id_three_missing(sample_srt, settings, tmp_path)
+    calls = []
+
+    def fake_translate_batch(client, settings, batch):
+        calls.append(sorted(batch.all_ids))
+        if len(batch.entries) > 1:
+            # Contextual attempt returns too many translations.
+            return TranslationResult(translations={3: "[PT] tres", 4: "[PT] cuatro"})
+        # Isolated attempt returns a different unexpected id.
+        return TranslationResult(translations={3: "[PT] tres", 5: "[PT] cinco"})
+
+    with (
+        patch("subtranslate.translator.translate_batch", fake_translate_batch),
+        pytest.raises(TranslationError) as exc_info,
+    ):
+        translate(sample_srt, output, settings)
+
+    message = str(exc_info.value)
+    assert "Isolated fallback also failed" in message
+    assert "unexpected ids: [5]" in message
+    assert not output.exists()
+
+
+def test_invalid_response_schema_fails_fast_without_recovery(
+    sample_srt: Path, settings, tmp_path: Path, checkpoint_dir: Path
+) -> None:
+    """An invalid request schema is not retried, split, or recovered."""
+    output = tmp_path / "out.srt"
+    _checkpoint_with_only_id_three_missing(sample_srt, settings, tmp_path)
+    calls = []
+
+    def fake_translate_batch(client, settings, batch):
+        calls.append(sorted(batch.all_ids))
+        raise _bad_request_error(
+            "invalid_json_schema",
+            "Invalid schema for response_format 'json_schema'",
+        )
+
+    with (
+        patch("subtranslate.translator.translate_batch", fake_translate_batch),
+        pytest.raises(TranslationError),
+    ):
+        translate(sample_srt, output, settings)
+
+    assert not output.exists()
+    assert calls == [[1, 2, 3, 4, 5]]
+
+
+def test_schema_output_violation_triggers_singleton_recovery(
+    sample_srt: Path, settings, tmp_path: Path, checkpoint_dir: Path
+) -> None:
+    """A model output that violates the structured schema triggers stripped-context recovery."""
+    output = tmp_path / "out.srt"
+    _checkpoint_with_only_id_three_missing(sample_srt, settings, tmp_path)
+    calls = []
+
+    def fake_translate_batch(client, settings, batch):
+        calls.append(sorted(batch.all_ids))
+        if len(batch.entries) > 1:
+            raise _bad_request_error(
+                "json_schema",
+                "Failed to generate valid JSON format",
+            )
+        return TranslationResult(translations={3: "[PT] tres"})
+
+    with patch("subtranslate.translator.translate_batch", fake_translate_batch):
+        translate(sample_srt, output, settings)
+
+    translated = load_subtitles(output)
+    assert translated[2].text == "[PT] tres"
+    assert [1, 2, 3, 4, 5] in calls
+    assert [3] in calls
